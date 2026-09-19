@@ -1,0 +1,30 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\FolderLock.Core\FolderLock.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <PackageReference Include="WPF-UI" Version="4.3.0" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <FolderLockHello Condition="'$(FolderLockHello)' == ''">true</FolderLockHello>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework Condition="'$(FolderLockHello)' == 'true'">net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetFramework Condition="'$(FolderLockHello)' != 'true'">net8.0-windows</TargetFramework>
+    <DefineConstants Condition="'$(FolderLockHello)' != 'true'">$(DefineConstants);FOLDERLOCK_NO_HELLO</DefineConstants>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>FolderLock.App</RootNamespace>
+  </PropertyGroup>
+
+</Project>

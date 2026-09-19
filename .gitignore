@@ -1,0 +1,24 @@
+# Build output
+bin/
+obj/
+artifacts/
+
+# IDE
+.vs/
+.idea/
+*.user
+*.suo
+
+# Publish output
+publish/
+
+# App runtime data
+*.flvault
+portable.flag
+*.db
+*.db.plain
+db.key
+
+# OS
+Thumbs.db
+desktop.ini

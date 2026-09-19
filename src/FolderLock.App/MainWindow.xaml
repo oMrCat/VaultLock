@@ -1,0 +1,374 @@
+﻿<ui:FluentWindow x:Class="FolderLock.App.MainWindow"
+                 xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                 xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                 xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+                 xmlns:local="clr-namespace:FolderLock.App"
+                 Title="{local:Loc App.Title}"
+                 Height="700"
+                 Width="1120"
+                 MinHeight="540"
+                 MinWidth="880"
+                 WindowStartupLocation="CenterScreen"
+                 ExtendsContentIntoTitleBar="True"
+                 WindowBackdropType="Mica"
+                 WindowCornerPreference="Round">
+    <ui:FluentWindow.Resources>
+        <Style x:Key="NavButtonStyle" TargetType="RadioButton">
+            <Setter Property="Margin" Value="0,2" />
+            <Setter Property="Padding" Value="12,10" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <Border x:Name="Root"
+                                CornerRadius="6"
+                                Background="{TemplateBinding Background}"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Root" Property="Background" Value="{DynamicResource SubtleFillColorSecondaryBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Root" Property="Background" Value="{DynamicResource SubtleFillColorTertiaryBrush}" />
+                                <Setter Property="FontWeight" Value="SemiBold" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </ui:FluentWindow.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <ui:TitleBar Grid.Row="0" Title="{local:Loc App.Title}">
+            <ui:TitleBar.Icon>
+                <ui:SymbolIcon Symbol="ShieldLock24" />
+            </ui:TitleBar.Icon>
+        </ui:TitleBar>
+
+        <Grid Grid.Row="1"
+              Width="{Binding RelativeSource={RelativeSource AncestorType=Window}, Path=ActualWidth}">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="236" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <!-- Navigation rail -->
+            <Border Grid.Column="0"
+                    Background="{DynamicResource LayerFillColorDefaultBrush}"
+                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="0,0,1,0">
+                <DockPanel Margin="14,10,14,16">
+                    <ui:Button DockPanel.Dock="Bottom"
+                               Click="AddFolder_Click"
+                               Appearance="Primary"
+                               HorizontalAlignment="Stretch"
+                               HorizontalContentAlignment="Center"
+                               Margin="0,14,0,0">
+                        <StackPanel Orientation="Horizontal">
+                            <ui:SymbolIcon Symbol="Add24" Margin="0,0,8,0" />
+                            <TextBlock Text="{local:Loc Btn.AddFolder}" />
+                        </StackPanel>
+                    </ui:Button>
+
+                    <StackPanel>
+                        <TextBlock Text="{local:Loc Nav.Section}"
+                                   Margin="12,6,0,6"
+                                   FontSize="12"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+
+                        <RadioButton x:Name="NavAll" GroupName="Nav" Tag="All" IsChecked="True"
+                                     Style="{StaticResource NavButtonStyle}" Click="Nav_Click">
+                            <Grid>
+                                <StackPanel Orientation="Horizontal">
+                                    <ui:SymbolIcon Symbol="Folder24" Margin="0,0,10,0" />
+                                    <TextBlock Text="{local:Loc Nav.All}" />
+                                </StackPanel>
+                                <TextBlock x:Name="NavAllCount" HorizontalAlignment="Right"
+                                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                            </Grid>
+                        </RadioButton>
+
+                        <RadioButton x:Name="NavLocked" GroupName="Nav" Tag="Locked"
+                                     Style="{StaticResource NavButtonStyle}" Click="Nav_Click">
+                            <Grid>
+                                <StackPanel Orientation="Horizontal">
+                                    <ui:SymbolIcon Symbol="LockClosed24" Margin="0,0,10,0" />
+                                    <TextBlock Text="{local:Loc Nav.Locked}" />
+                                </StackPanel>
+                                <TextBlock x:Name="NavLockedCount" HorizontalAlignment="Right"
+                                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                            </Grid>
+                        </RadioButton>
+
+                        <RadioButton x:Name="NavUnlocked" GroupName="Nav" Tag="Unlocked"
+                                     Style="{StaticResource NavButtonStyle}" Click="Nav_Click">
+                            <Grid>
+                                <StackPanel Orientation="Horizontal">
+                                    <ui:SymbolIcon Symbol="LockOpen24" Margin="0,0,10,0" />
+                                    <TextBlock Text="{local:Loc Nav.Unlocked}" />
+                                </StackPanel>
+                                <TextBlock x:Name="NavUnlockedCount" HorizontalAlignment="Right"
+                                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                            </Grid>
+                        </RadioButton>
+
+                        <RadioButton x:Name="NavEncrypted" GroupName="Nav" Tag="Encrypted"
+                                     Style="{StaticResource NavButtonStyle}" Click="Nav_Click">
+                            <Grid>
+                                <StackPanel Orientation="Horizontal">
+                                    <ui:SymbolIcon Symbol="Key24" Margin="0,0,10,0" />
+                                    <TextBlock Text="{local:Loc Nav.Encrypted}" />
+                                </StackPanel>
+                                <TextBlock x:Name="NavEncryptedCount" HorizontalAlignment="Right"
+                                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                            </Grid>
+                        </RadioButton>
+                    </StackPanel>
+                </DockPanel>
+            </Border>
+
+            <!-- Content -->
+            <Grid Grid.Column="1">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <Grid Grid.Row="0" Margin="24,16,20,12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <StackPanel>
+                        <TextBlock x:Name="PageTitle" Text="全部文件夹" FontSize="24" FontWeight="SemiBold" />
+                        <TextBlock x:Name="PageSubtitle" Text="0 个项目"
+                                   Margin="0,2,0,0"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                        <ui:TextBox x:Name="SearchBox"
+                                    Width="230"
+                                    PlaceholderText="{local:Loc Search.Placeholder}"
+                                    TextChanged="SearchBox_TextChanged" />
+                        <ui:Button Content="{local:Loc Btn.Lock}" Click="Lock_Click" Margin="10,0,0,0" />
+                        <ui:Button Content="{local:Loc Btn.Unlock}" Click="Unlock_Click" Margin="8,0,0,0" />
+                        <ui:Button x:Name="MoreButton" Appearance="Transparent" Width="36" Height="36"
+                                   Padding="0" Margin="8,0,0,0" Click="More_Click">
+                            <ui:SymbolIcon Symbol="MoreHorizontal24" />
+                            <ui:Button.ContextMenu>
+                                <ContextMenu>
+                                    <MenuItem Header="{local:Loc Btn.Refresh}" Click="Refresh_Click" />
+                                    <Separator />
+                                    <MenuItem Header="{local:Loc Menu.RegisterShell}" Click="InstallShell_Click" />
+                                    <MenuItem Header="{local:Loc Menu.UnregisterShell}" Click="UninstallShell_Click" />
+                                    <Separator />
+                                    <MenuItem x:Name="StartupMenuItem" Header="{local:Loc Menu.Startup}" IsCheckable="True" Click="ToggleStartup_Click" />
+                                    <MenuItem Header="{local:Loc Menu.AutoLock}">
+                                        <MenuItem x:Name="AutoLockSessionItem" Header="{local:Loc Menu.AutoLockSession}" IsCheckable="True" Click="AutoLockSession_Click" />
+                                        <MenuItem x:Name="AutoLockIdleItem" Header="{local:Loc Menu.AutoLockIdle}" IsCheckable="True" Click="AutoLockIdle_Click" />
+                                        <MenuItem x:Name="AutoRelockItem" Header="{local:Loc Menu.AutoRelock}" IsCheckable="True" Click="AutoRelock_Click" />
+                                        <Separator />
+                                        <MenuItem x:Name="PanicHotkeyItem" Header="{local:Loc Menu.Hotkey}" IsCheckable="True" Click="PanicHotkey_Click" />
+                                    </MenuItem>
+                                    <MenuItem x:Name="WindowsHelloItem" Header="{local:Loc Menu.WindowsHello}" IsCheckable="True" Click="WindowsHello_Click" />
+                                    <Separator />
+                                    <MenuItem Header="{local:Loc Menu.InstallService}" Click="InstallService_Click" />
+                                    <MenuItem Header="{local:Loc Menu.UninstallService}" Click="UninstallService_Click" />
+                                    <Separator />
+                                    <MenuItem Header="{local:Loc Menu.Theme}">
+                                        <MenuItem x:Name="ThemeSystemItem" Header="{local:Loc Menu.ThemeSystem}" IsCheckable="True" Click="Theme_Click" Tag="System" />
+                                        <MenuItem x:Name="ThemeDarkItem" Header="{local:Loc Menu.ThemeDark}" IsCheckable="True" Click="Theme_Click" Tag="Dark" />
+                                        <MenuItem x:Name="ThemeLightItem" Header="{local:Loc Menu.ThemeLight}" IsCheckable="True" Click="Theme_Click" Tag="Light" />
+                                    </MenuItem>
+                                    <MenuItem Header="{local:Loc Menu.Language}">
+                                        <MenuItem x:Name="LangSystemItem" Header="{local:Loc Menu.LanguageSystem}" IsCheckable="True" Click="Language_Click" Tag="System" />
+                                        <MenuItem x:Name="LangZhItem" Header="{local:Loc Menu.LanguageZh}" IsCheckable="True" Click="Language_Click" Tag="中文" />
+                                        <MenuItem x:Name="LangEnItem" Header="{local:Loc Menu.LanguageEn}" IsCheckable="True" Click="Language_Click" Tag="English" />
+                                    </MenuItem>
+                                    <MenuItem Header="{local:Loc Menu.ViewLogs}" Click="ViewLogs_Click" />
+                                    <Separator />
+                                    <MenuItem Header="{local:Loc Menu.VaultTools}" Click="VaultTools_Click" />
+                                    <MenuItem Header="{local:Loc Menu.ExportKit}" Click="ExportKit_Click" />
+                                    <MenuItem Header="{local:Loc Menu.ImportKit}" Click="ImportKit_Click" />
+                                    <Separator />
+                                    <MenuItem Header="{local:Loc Menu.CheckUpdate}" Click="CheckUpdate_Click" />
+                                    <MenuItem Header="{local:Loc Menu.OpenDataDir}" Click="OpenDataDir_Click" />
+                                    <MenuItem Header="{local:Loc Menu.SafetyInfo}" Click="SafetyInfo_Click" />
+                                </ContextMenu>
+                            </ui:Button.ContextMenu>
+                        </ui:Button>
+                    </StackPanel>
+                </Grid>
+
+                <Grid Grid.Row="1">
+                    <DataGrid x:Name="FolderList"
+                              Margin="16,0"
+                              Background="Transparent"
+                              BorderThickness="0"
+                              AutoGenerateColumns="False"
+                              CanUserAddRows="False"
+                              CanUserDeleteRows="False"
+                              CanUserResizeRows="False"
+                              CanUserReorderColumns="False"
+                              IsReadOnly="True"
+                              SelectionMode="Single"
+                              HeadersVisibility="Column"
+                              GridLinesVisibility="None"
+                              RowHeaderWidth="0"
+                              AllowDrop="True"
+                              SelectionChanged="FolderList_SelectionChanged"
+                              MouseDoubleClick="FolderList_MouseDoubleClick"
+                              DragOver="FolderList_DragOver"
+                              Drop="FolderList_Drop">
+                        <DataGrid.Columns>
+                            <DataGridTemplateColumn Header="{local:Loc Column.Name}" Width="*" SortMemberPath="DisplayName">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <Grid Margin="6,6">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <Border Width="36" Height="36" CornerRadius="8"
+                                                    Background="{DynamicResource SubtleFillColorSecondaryBrush}">
+                                                <ui:SymbolIcon x:Name="RowIcon" Symbol="LockOpen24" FontSize="18"
+                                                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                            </Border>
+                                            <StackPanel Grid.Column="1" Margin="12,0" VerticalAlignment="Center">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" />
+                                                    <Border x:Name="StatusChip" CornerRadius="10" Padding="9,2" Margin="10,0,0,0"
+                                                            Background="{DynamicResource SystemFillColorSuccessBackgroundBrush}">
+                                                        <TextBlock Text="{Binding StatusText}" FontSize="11" />
+                                                    </Border>
+                                                    <TextBlock Text="{Binding ModeText}" FontSize="11" Margin="8,0,0,0"
+                                                               VerticalAlignment="Center"
+                                                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                                </StackPanel>
+                                                <TextBlock Text="{Binding Path}" FontSize="12" Margin="0,2,0,0"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                            </StackPanel>
+                                        </Grid>
+                                        <DataTemplate.Triggers>
+                                            <DataTrigger Binding="{Binding IsLocked}" Value="True">
+                                                <Setter TargetName="RowIcon" Property="Symbol" Value="LockClosed24" />
+                                                <Setter TargetName="StatusChip" Property="Background"
+                                                        Value="{DynamicResource SystemFillColorCriticalBackgroundBrush}" />
+                                            </DataTrigger>
+                                        </DataTemplate.Triggers>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <StackPanel x:Name="EmptyState" VerticalAlignment="Center" HorizontalAlignment="Center"
+                                Visibility="Collapsed">
+                        <ui:SymbolIcon Symbol="Folder24" FontSize="48"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                       HorizontalAlignment="Center" />
+                        <TextBlock Text="{local:Loc Empty.Title}" FontSize="18" FontWeight="SemiBold"
+                                   Margin="0,14,0,0" HorizontalAlignment="Center" />
+                        <TextBlock Text="{local:Loc Empty.Hint}"
+                                   Margin="0,6,0,0"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                   HorizontalAlignment="Center" />
+                    </StackPanel>
+                </Grid>
+
+                <Border Grid.Row="2" Padding="24,10"
+                        BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="0,1,0,0">
+                    <Grid>
+                        <TextBlock x:Name="StatusText" Text="{local:Loc Status.Ready}"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        <TextBlock x:Name="CountText" Text="" HorizontalAlignment="Right"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    </Grid>
+                </Border>
+            </Grid>
+
+            <!-- Detail panel -->
+            <Border x:Name="DetailPanel" Grid.Column="2" Width="300" Visibility="Collapsed"
+                    Background="{DynamicResource LayerFillColorDefaultBrush}"
+                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1,0,0,0">
+                <StackPanel Margin="20,18">
+                    <StackPanel Orientation="Horizontal">
+                        <Border Width="44" Height="44" CornerRadius="10"
+                                Background="{DynamicResource SubtleFillColorSecondaryBrush}">
+                            <ui:SymbolIcon x:Name="DetailIcon" Symbol="LockOpen24" FontSize="22"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
+                            <TextBlock x:Name="DetailName" FontSize="16" FontWeight="SemiBold"
+                                       TextTrimming="CharacterEllipsis" />
+                            <TextBlock x:Name="DetailStatus" FontSize="12"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                    </StackPanel>
+
+                    <TextBlock Text="{local:Loc Detail.Path}" Margin="0,20,0,4" FontSize="12"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <TextBlock x:Name="DetailPath" TextWrapping="Wrap" FontSize="12" />
+
+                    <TextBlock Text="{local:Loc Detail.Mode}" Margin="0,16,0,4" FontSize="12"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <TextBlock x:Name="DetailMode" FontSize="13" />
+
+                    <TextBlock Text="{local:Loc Detail.Last}" Margin="0,16,0,4" FontSize="12"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <TextBlock x:Name="DetailLast" FontSize="13" />
+
+                    <ui:Button Content="{local:Loc Detail.Open}" Click="Open_Click" Margin="0,24,0,0"
+                               HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
+                    <ui:Button Content="{local:Loc Btn.Lock}" Click="Lock_Click" Margin="0,8,0,0"
+                               HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
+                    <ui:Button Content="{local:Loc Btn.Unlock}" Click="Unlock_Click" Margin="0,8,0,0"
+                               HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
+                    <ui:Button Content="{local:Loc Detail.ChangePassword}" Click="ChangePassword_Click" Margin="0,8,0,0"
+                               HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
+                    <ui:Button Content="{local:Loc Detail.ViewRecovery}" Click="ViewRecovery_Click" Margin="0,8,0,0"
+                               HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
+                    <ui:Button Content="{local:Loc Detail.Remove}" Click="Remove_Click" Margin="0,8,0,0"
+                               HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
+                </StackPanel>
+            </Border>
+
+            <!-- Operation overlay -->
+            <Grid x:Name="ProgressOverlay"
+                  Grid.ColumnSpan="3"
+                  Visibility="Collapsed"
+                  Background="#99000000">
+                <Border Width="380" Padding="28"
+                        HorizontalAlignment="Center" VerticalAlignment="Center"
+                        CornerRadius="12"
+                        Background="{DynamicResource SolidBackgroundFillColorBaseBrush}"
+                        BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1">
+                    <StackPanel>
+                        <ui:ProgressRing Width="72" Height="72" IsIndeterminate="True" HorizontalAlignment="Center" />
+                        <TextBlock x:Name="ProgressText" Margin="0,18,0,0" TextAlignment="Center" Text="正在处理…" />
+                        <ui:Button x:Name="CancelButton" Content="取消" Margin="0,20,0,0"
+                                   HorizontalAlignment="Center" Click="CancelOperation_Click" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+        </Grid>
+    </Grid>
+</ui:FluentWindow>
