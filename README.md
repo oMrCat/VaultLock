@@ -9,7 +9,7 @@ behind a clean Fluent (Windows 11 style) UI.
 > The Windows project/namespace is `FolderLock` for historical reasons; the
 > product is published as **VaultLock**.
 
-[中文文档 / Chinese README](README.zh-CN.md) · [Wiki](https://github.com/oMrCat/VaultLock/wiki)
+[中文文档 / Chinese README](README.zh-CN.md) · [Docs](docs/wiki/Home.md) · [Wiki](https://github.com/oMrCat/VaultLock/wiki)
 
 ---
 

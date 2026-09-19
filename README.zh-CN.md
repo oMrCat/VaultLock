@@ -6,7 +6,7 @@
 
 > Windows 工程/命名空间沿用历史名 `FolderLock`，对外产品名为 **VaultLock**。
 
-[English README](README.md) · [Wiki](https://github.com/oMrCat/VaultLock/wiki)
+[English README](README.md) · [文档](docs/wiki/中文文档.md) · [Wiki](https://github.com/oMrCat/VaultLock/wiki)
 
 ---
 
