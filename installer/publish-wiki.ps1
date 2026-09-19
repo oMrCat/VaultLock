@@ -30,9 +30,16 @@ git clone $url $temp
 try {
     Get-ChildItem (Join-Path $temp "*.md") -ErrorAction SilentlyContinue | Remove-Item -Force
     Copy-Item (Join-Path $WikiDir "*.md") $temp
-
     Push-Location $temp
-    try {
+    try
+    {
+        if (-not (git config user.email)) {
+            git config user.email "130645935+oMrCat@users.noreply.github.com"
+        }
+        if (-not (git config user.name)) {
+            git config user.name "oMrCat"
+        }
+
         git add -A
         git commit -m "Docs: sync wiki from docs/wiki" 2>$null
         git push
