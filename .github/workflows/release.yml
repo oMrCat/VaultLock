@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Test
+        run: dotnet test FolderLock.sln -c Release --nologo
+
+      - name: Publish app (full, with Windows Hello)
+        run: >
+          dotnet publish src/FolderLock.App/FolderLock.App.csproj
+          -c Release -p:PublishProfile=win-x64 -p:FolderLockHello=true -o publish/full
+
+      - name: Publish app (lite, no Windows Hello)
+        run: >
+          dotnet publish src/FolderLock.App/FolderLock.App.csproj
+          -c Release -p:PublishProfile=win-x64 -p:FolderLockHello=false -o publish/lite
+
+      - name: Publish guard service
+        run: >
+          dotnet publish src/FolderLock.Service/FolderLock.Service.csproj
+          -c Release -r win-x64 --self-contained false -o publish/service
+
+      - name: Stage and package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = "${{ github.ref_name }}"
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+
+          Copy-Item publish/service/FolderLock.Service.exe publish/full/
+          Copy-Item publish/service/FolderLock.Service.exe publish/lite/
+
+          Copy-Item README.md, LICENSE publish/full/
+          Copy-Item README.md, LICENSE publish/lite/
+
+          Compress-Archive -Path publish/full/* -DestinationPath "artifacts/VaultLock-$tag-win-x64.zip" -Force
+          Compress-Archive -Path publish/lite/* -DestinationPath "artifacts/VaultLock-$tag-lite-win-x64.zip" -Force
+
+          Get-ChildItem artifacts | Select-Object Name, Length
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.zip
+          generate_release_notes: true
+          draft: false
+          prerelease: false
