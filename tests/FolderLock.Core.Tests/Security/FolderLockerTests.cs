@@ -1,4 +1,5 @@
 using System.Security.AccessControl;
+using System.Security.Principal;
 using FolderLock.Core.Security;
 
 namespace FolderLock.Core.Tests.Security;
@@ -57,7 +58,7 @@ public sealed class FolderLockerTests : IDisposable
     public void Unlock_RestoresOriginalDacl()
     {
         var original = new DirectoryInfo(_folder).GetAccessControl(AccessControlSections.Access);
-        var originalSddl = original.GetSecurityDescriptorSddlForm(AccessControlSections.Access);
+        var originalRules = DescribeExplicitRules(original);
         var originalProtected = original.AreAccessRulesProtected;
 
         _backup = _locker.Lock(_folder);
@@ -65,8 +66,24 @@ public sealed class FolderLockerTests : IDisposable
         _backup = null;
 
         var restored = new DirectoryInfo(_folder).GetAccessControl(AccessControlSections.Access);
-        Assert.Equal(originalSddl, restored.GetSecurityDescriptorSddlForm(AccessControlSections.Access));
+
+        // Compare the effective access rules rather than the raw descriptor SDDL:
+        // Windows re-applies the SE_DACL_AUTO_INHERITED control flag on restore,
+        // which is not a behavioral difference.
+        Assert.Equal(originalRules, DescribeExplicitRules(restored));
         Assert.Equal(originalProtected, restored.AreAccessRulesProtected);
+        Assert.False(_locker.IsLocked(_folder));
+    }
+
+    private static List<string> DescribeExplicitRules(DirectorySecurity security)
+    {
+        return security
+            .GetAccessRules(includeExplicit: true, includeInherited: false, targetType: typeof(SecurityIdentifier))
+            .Cast<FileSystemAccessRule>()
+            .Select(rule =>
+                $"{rule.IdentityReference.Value}|{rule.AccessControlType}|{rule.FileSystemRights}|{rule.InheritanceFlags}|{rule.PropagationFlags}")
+            .OrderBy(text => text, StringComparer.Ordinal)
+            .ToList();
     }
 
     [Fact]
