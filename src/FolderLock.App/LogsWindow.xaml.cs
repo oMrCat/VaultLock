@@ -73,15 +73,7 @@ public partial class LogsWindow : FluentWindow
         }
     }
 
-    private static string Escape(string value)
-    {
-        if (value.Contains(',') || value.Contains('"') || value.Contains('\n'))
-        {
-            return "\"" + value.Replace("\"", "\"\"") + "\"";
-        }
-
-        return value;
-    }
+    private static string Escape(string value) => FolderLock.Core.Util.CsvSanitizer.Escape(value);
 
     private void Close_Click(object sender, RoutedEventArgs e) => Close();
 }

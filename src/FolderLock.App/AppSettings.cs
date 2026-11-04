@@ -27,6 +27,9 @@ public sealed class AppSettings
 
     public bool CachePasswords { get; set; } = true;
 
+    /// <summary>是否在锁定后清理系统共享的缩略图/图标缓存（默认关闭，避免影响其它文件夹）。</summary>
+    public bool CleanExplorerCaches { get; set; }
+
     public string Language { get; set; } = "System";
 
     public bool WindowsHello { get; set; }
@@ -64,8 +67,9 @@ public sealed class AppSettings
         try
         {
             var path = GetFilePath();
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.WriteAllText(path, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+            FolderLock.Core.Util.AtomicFile.WriteAllText(
+                path,
+                JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
         }
         catch
         {

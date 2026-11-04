@@ -297,8 +297,12 @@
                     <Grid>
                         <TextBlock x:Name="StatusText" Text="{local:Loc Status.Ready}"
                                    Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
-                        <TextBlock x:Name="CountText" Text="" HorizontalAlignment="Right"
-                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                            <TextBlock x:Name="SignatureStatusText" Text="" Margin="0,0,16,0"
+                                       Foreground="{DynamicResource SystemFillColorCautionBrush}" />
+                            <TextBlock x:Name="CountText" Text=""
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
                     </Grid>
                 </Border>
             </Grid>

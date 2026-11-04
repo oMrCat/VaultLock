@@ -75,6 +75,19 @@ public partial class App : Application
         base.OnExit(e);
     }
 
+    /// <summary>
+    /// 释放单实例互斥体，供“语言切换后重启”在启动新进程前调用，
+    /// 避免新进程误判已有实例而直接退出。
+    /// </summary>
+    public static void ReleaseSingleInstance()
+    {
+        if (Current is App app)
+        {
+            app._instance?.Dispose();
+            app._instance = null;
+        }
+    }
+
     private static bool RunHeadlessShellCommand(string[] args)
     {
         foreach (var arg in args)

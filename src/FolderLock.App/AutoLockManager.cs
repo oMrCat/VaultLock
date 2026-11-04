@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Windows.Interop;
 using System.Windows.Threading;
+using FolderLock.Core.Services;
 
 namespace FolderLock.App;
 
@@ -19,6 +20,7 @@ public sealed class AutoLockManager : IDisposable
     private readonly MainWindow _window;
     private readonly DispatcherTimer _timer;
     private readonly Dictionary<long, DateTimeOffset> _unlockTimes = new();
+    private readonly RelockGate _gate = new();
     private HwndSource? _source;
     private IntPtr _handle;
     private bool _hotkeyRegistered;
@@ -91,15 +93,51 @@ public sealed class AutoLockManager : IDisposable
             var now = DateTimeOffset.UtcNow;
             foreach (var id in _unlockTimes.Where(pair => now - pair.Value >= window).Select(pair => pair.Key).ToList())
             {
+                // single-flight：同一文件夹的重锁在上一次完成前不重复发起。
+                if (!_gate.TryEnter(id))
+                {
+                    continue;
+                }
+
                 _unlockTimes.Remove(id);
-                _window.LockFolderSilently(id, "临时解锁到期");
+                _ = RelockAsync(id);
             }
         }
 
         var idleMinutes = AppSettings.Current.AutoLockIdleMinutes;
         if (idleMinutes > 0 && GetIdleTime() >= TimeSpan.FromMinutes(idleMinutes))
         {
-            _window.LockAllUnlocked("空闲超时");
+            _ = LockAllAsync("空闲超时");
+        }
+    }
+
+    private async Task RelockAsync(long id)
+    {
+        try
+        {
+            await _window.LockFolderSilentlyAsync(id, "临时解锁到期");
+        }
+        finally
+        {
+            _gate.Exit(id);
+        }
+    }
+
+    private async Task LockAllAsync(string reason)
+    {
+        // 空闲/会话锁定的全量重锁同样只允许一个在途任务。
+        if (!_gate.TryEnterGlobal())
+        {
+            return;
+        }
+
+        try
+        {
+            await _window.LockAllUnlockedAsync(reason);
+        }
+        finally
+        {
+            _gate.ExitGlobal();
         }
     }
 
@@ -111,7 +149,7 @@ public sealed class AutoLockManager : IDisposable
             if ((sessionEvent == WtsSessionLock || sessionEvent == WtsSessionLogoff) &&
                 AppSettings.Current.AutoLockOnSessionLock)
             {
-                _window.LockAllUnlocked(sessionEvent == WtsSessionLock ? "屏幕已锁定" : "用户注销");
+                _ = LockAllAsync(sessionEvent == WtsSessionLock ? "屏幕已锁定" : "用户注销");
             }
         }
         else if (msg == WmHotkey && wParam.ToInt32() == HotkeyId)

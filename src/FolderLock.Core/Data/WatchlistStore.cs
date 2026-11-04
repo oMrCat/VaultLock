@@ -1,6 +1,23 @@
 using System.Text.Json;
+using FolderLock.Core.Util;
 
 namespace FolderLock.Core.Data;
+
+public sealed class WatchlistReadException : Exception
+{
+    public WatchlistReadException(string message, Exception inner)
+        : base(message, inner)
+    {
+    }
+}
+
+public sealed class WatchlistWriteException : Exception
+{
+    public WatchlistWriteException(string message, Exception inner)
+        : base(message, inner)
+    {
+    }
+}
 
 public sealed class WatchlistStore
 {
@@ -13,46 +30,67 @@ public sealed class WatchlistStore
         _path = path ?? GetDefaultPath();
     }
 
+    public string Path => _path;
+
     public static string GetDefaultPath()
     {
         if (AppPaths.IsPortable)
         {
-            return Path.Combine(AppPaths.DataDirectory, "watchlist.json");
+            return System.IO.Path.Combine(AppPaths.DataDirectory, "watchlist.json");
         }
 
         var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-        return Path.Combine(programData, "FolderLock", "watchlist.json");
+        return System.IO.Path.Combine(programData, "FolderLock", "watchlist.json");
     }
 
     public IReadOnlyList<string> Load()
     {
+        if (!TryLoad(out var entries, out var error))
+        {
+            throw new WatchlistReadException(error!, new IOException(error));
+        }
+
+        return entries;
+    }
+
+    public bool TryLoad(out IReadOnlyList<string> entries, out string? error)
+    {
+        entries = Array.Empty<string>();
+        error = null;
+
         try
         {
             if (!File.Exists(_path))
             {
-                return Array.Empty<string>();
+                return true;
             }
 
             var json = File.ReadAllText(_path);
-            return JsonSerializer.Deserialize<List<string>>(json) ?? new List<string>();
+            entries = JsonSerializer.Deserialize<List<string>>(json) ?? new List<string>();
+            return true;
         }
-        catch
+        catch (Exception ex)
         {
-            return Array.Empty<string>();
+            error = $"无法读取监控列表 {_path}：{ex.Message}";
+            return false;
         }
     }
 
     public void Save(IEnumerable<string> paths)
     {
-        var directory = Path.GetDirectoryName(_path);
-        if (!string.IsNullOrEmpty(directory))
-        {
-            Directory.CreateDirectory(directory);
-        }
+        ArgumentNullException.ThrowIfNull(paths);
 
-        var payload = JsonSerializer.Serialize(paths.Distinct(StringComparer.OrdinalIgnoreCase).ToList(), Options);
-        var temp = _path + ".tmp";
-        File.WriteAllText(temp, payload);
-        File.Move(temp, _path, overwrite: true);
+        var payload = JsonSerializer.Serialize(
+            paths.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+            Options);
+
+        try
+        {
+            AtomicFile.WriteAllText(_path, payload);
+        }
+        catch (Exception ex)
+        {
+            throw new WatchlistWriteException($"无法写入监控列表 {_path}：{ex.Message}", ex);
+        }
     }
 }

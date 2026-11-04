@@ -48,6 +48,7 @@ public partial class MainWindow : FluentWindow
         _watchdog.Start();
 
         _autoLock = new AutoLockManager(this);
+        Loaded += (_, _) => ReportPendingUpdateFailure();
         SourceInitialized += (_, _) =>
         {
             var handle = new WindowInteropHelper(this).Handle;
@@ -55,50 +56,51 @@ public partial class MainWindow : FluentWindow
         };
     }
 
-    public void LockAllUnlocked(string reason)
-    {
-        Task.Run(() =>
-        {
-            var locked = AppServices.Folders.LockAll(AppServices.Keyring);
-            if (locked.Count == 0)
-            {
-                return;
-            }
+    public void LockAllUnlocked(string reason) => _ = LockAllUnlockedAsync(reason);
 
-            Dispatcher.Invoke(() =>
-            {
-                Reload();
-                UpdateStatus($"已自动锁定 {locked.Count} 个文件夹（{reason}）。");
-                Tray?.ShowBalloon("FolderLock", $"{reason}：已自动锁定 {locked.Count} 个文件夹。");
-            });
-        });
+    public async Task<bool> LockAllUnlockedAsync(string reason)
+    {
+        var locked = await Task.Run(() => AppServices.Folders.LockAll(AppServices.Keyring));
+        if (locked.Count == 0)
+        {
+            return false;
+        }
+
+        Reload();
+        UpdateStatus($"已自动锁定 {locked.Count} 个文件夹（{reason}）。");
+        Tray?.ShowBalloon("FolderLock", $"{reason}：已自动锁定 {locked.Count} 个文件夹。");
+        return true;
     }
 
-    public void LockFolderSilently(long id, string reason)
-    {
-        Task.Run(() =>
-        {
-            try
-            {
-                if (!AppServices.Keyring.TryGet(id, out var secret))
-                {
-                    return;
-                }
+    public void LockFolderSilently(long id, string reason) => _ = LockFolderSilentlyAsync(id, reason);
 
+    public async Task LockFolderSilentlyAsync(long id, string reason)
+    {
+        // 未缓存密码时无法自动重锁：必须明确提示，不能静默失败。
+        if (!AppServices.Keyring.TryGet(id, out var secret))
+        {
+            UpdateStatus($"未缓存密码，无法自动重新锁定（{reason}），请手动锁定。");
+            Tray?.ShowBalloon("FolderLock", $"未缓存密码，无法自动重新锁定（{reason}），请手动锁定。");
+            return;
+        }
+
+        try
+        {
+            await Task.Run(() =>
+            {
                 AppServices.Folders.Lock(id, secret);
                 AppServices.Keyring.Remove(id);
+            });
 
-                Dispatcher.Invoke(() =>
-                {
-                    Reload(id);
-                    UpdateStatus($"已自动重新锁定（{reason}）。");
-                    Tray?.ShowBalloon("FolderLock", "临时解锁到期，已重新锁定。");
-                });
-            }
-            catch
-            {
-            }
-        });
+            Reload(id);
+            UpdateStatus($"已自动重新锁定（{reason}）。");
+            Tray?.ShowBalloon("FolderLock", "临时解锁到期，已重新锁定。");
+        }
+        catch (Exception ex)
+        {
+            UpdateStatus($"自动重新锁定失败：{ex.Message}");
+            Tray?.ShowBalloon("FolderLock", $"自动重新锁定失败：{ex.Message}");
+        }
     }
 
     public void PanicLock()
@@ -240,8 +242,13 @@ public partial class MainWindow : FluentWindow
 
     private void RestartApplication()
     {
+        ExitRequested = true;
+
         try
         {
+            // 先释放单实例互斥体，再启动新进程，避免新进程因“已有实例”而立即退出。
+            App.ReleaseSingleInstance();
+
             if (Environment.ProcessPath is { } exe)
             {
                 Process.Start(new ProcessStartInfo { FileName = exe, UseShellExecute = true });
@@ -251,7 +258,6 @@ public partial class MainWindow : FluentWindow
         {
         }
 
-        ExitRequested = true;
         Application.Current.Shutdown();
     }
 
@@ -292,7 +298,18 @@ public partial class MainWindow : FluentWindow
     private void UpdateStatus(string? message = null)
     {
         var locked = _items.Count(item => item.IsLocked);
-        StatusText.Text = message ?? L.T("Status.Ready");
+        var text = message ?? L.T("Status.Ready");
+
+        // watchlist 写入失败不能静默：在状态栏持续提示，直到下次成功写入。
+        if (AppServices.Folders.LastWatchlistError is { Length: > 0 } watchlistError)
+        {
+            text = $"{text}（监控列表写入失败：{watchlistError}）";
+        }
+
+        StatusText.Text = text;
+        SignatureStatusText.Text = ServiceSignaturePolicy.CurrentMode == SignatureEnforcementMode.Strict
+            ? string.Empty
+            : L.T("Status.SignatureWarn");
         CountText.Text = L.Format("Status.Count", _items.Count, locked);
         Tray?.UpdateStatus(_items.Count, locked);
         UpdateNavigation();
@@ -486,11 +503,15 @@ public partial class MainWindow : FluentWindow
 
         if (item.IsEncrypted)
         {
-            await RunVaultOperationAsync(
-                "正在加密",
-                (progress, token) => AppServices.Folders.LockAsync(item.Id, secret, progress, token));
-            Reload(item.Id);
-            ReportLockResult(item);
+            // 取消或失败时不能继续按“已锁定”处理，否则会误清缓存密码并显示错误状态。
+            if (await RunVaultOperationAsync(
+                    "正在加密",
+                    (progress, token) => AppServices.Folders.LockAsync(item.Id, secret, progress, token)))
+            {
+                Reload(item.Id);
+                ReportLockResult(item);
+            }
+
             return;
         }
 
@@ -521,15 +542,40 @@ public partial class MainWindow : FluentWindow
         AppServices.Keyring.Remove(item.Id);
         _autoLock.NoteLocked(item.Id);
 
+        var skipped = AppServices.Folders.LastSkippedVaultEntries;
+        if (skipped.Count > 0)
+        {
+            var preview = string.Join("\n", skipped.Take(5));
+            var more = skipped.Count > 5 ? $"\n…另有 {skipped.Count - 5} 项" : string.Empty;
+            MessageBox.Show(
+                this,
+                L.Current == "en"
+                    ? $"{skipped.Count} item(s) were NOT encrypted because they are symlinks/junctions:\n{preview}{more}\n\nTheir targets are not inside the vault."
+                    : $"以下 {skipped.Count} 项是符号链接/目录联接，其指向的内容不会进入加密容器：\n{preview}{more}\n\n请确认这些内容是否需要另行处理。",
+                "FolderLock",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+        }
+
+        var notes = AppServices.Folders.LastTraceClean?.Notes ?? new List<string>();
+        string status;
         if (AppServices.Folders.LastTraceClean is { } clean)
         {
-            UpdateStatus(
-                $"已加密并清理痕迹：快捷方式 {clean.ShortcutsRemoved}、注册表 {clean.RegistryValuesRemoved}、缓存 {clean.CacheFilesRemoved}。");
+            status = $"已加密并清理痕迹：快捷方式 {clean.ShortcutsRemoved}、注册表 {clean.RegistryValuesRemoved}、缓存 {clean.CacheFilesRemoved}。";
         }
         else
         {
-            UpdateStatus($"已锁定：{item.DisplayName}");
+            status = skipped.Count > 0
+                ? $"已锁定：{item.DisplayName}（{skipped.Count} 项链接未加密）"
+                : $"已锁定：{item.DisplayName}";
         }
+
+        if (notes.Count > 0)
+        {
+            status += " " + string.Join(" ", notes);
+        }
+
+        UpdateStatus(status);
     }
 
     private async void Unlock_Click(object sender, RoutedEventArgs e)
@@ -610,7 +656,7 @@ public partial class MainWindow : FluentWindow
         }
     }
 
-    private async Task RunVaultOperationAsync(
+    private async Task<bool> RunVaultOperationAsync(
         string title,
         Func<IProgress<VaultProgress>, CancellationToken, Task> operation)
     {
@@ -627,14 +673,17 @@ public partial class MainWindow : FluentWindow
         try
         {
             await operation(progress, _operationCts.Token);
+            return true;
         }
         catch (OperationCanceledException)
         {
             UpdateStatus("操作已取消。");
+            return false;
         }
         catch (Exception ex)
         {
             ShowError(ex);
+            return false;
         }
         finally
         {
@@ -773,7 +822,17 @@ public partial class MainWindow : FluentWindow
         {
             AppServices.Folders.SyncLockStates();
             Reload();
-            UpdateStatus("已刷新。");
+
+            // 三态同步：Unknown 表示权限/IO 异常导致无法判定实际状态，必须让用户看到。
+            var unknown = AppServices.Folders.LastUnknownPaths;
+            if (unknown.Count > 0)
+            {
+                UpdateStatus($"已刷新：{unknown.Count} 个文件夹状态无法判定（{unknown[0]}），请检查访问权限。");
+            }
+            else
+            {
+                UpdateStatus("已刷新。");
+            }
         }
         catch (Exception ex)
         {
@@ -1079,6 +1138,10 @@ public partial class MainWindow : FluentWindow
 
         using var secret = dialog.GetSecret();
         AppServices.Folders.Unlock(record.Id, secret);
+
+        // 外部命令解锁同样要进入自动重锁/密码缓存簿记，否则会绕过 AutoLock。
+        RememberSecret(record.Id, secret);
+
         Reload(record.Id);
         UpdateStatus("已解锁。");
     }
@@ -1291,7 +1354,7 @@ public partial class MainWindow : FluentWindow
 
             var target = Path.Combine(Path.GetTempPath(), "FolderLock.App.new.exe");
             await FolderLock.Core.Update.Updater.DownloadAsync(manifest, target);
-            ApplyUpdate(target);
+            ApplyUpdate(target, manifest.Sha256);
         }
         catch (Exception ex)
         {
@@ -1299,23 +1362,22 @@ public partial class MainWindow : FluentWindow
         }
     }
 
-    private void ApplyUpdate(string newExecutable)
+    private void ApplyUpdate(string newExecutable, string? expectedSha256)
     {
         var current = Environment.ProcessPath;
         if (string.IsNullOrEmpty(current))
         {
-            return;
+            throw new InvalidOperationException("无法确定当前程序路径，已取消更新。");
         }
 
-        var script = Path.Combine(Path.GetTempPath(), $"folderlock-update-{Guid.NewGuid():N}.cmd");
-        var content =
-            "@echo off\r\n" +
-            "timeout /t 1 /nobreak >nul\r\n" +
-            $"copy /y \"{newExecutable}\" \"{current}\" >nul\r\n" +
-            $"start \"\" \"{current}\"\r\n" +
-            "del \"%~f0\"\r\n";
+        // 覆盖前校验：文件存在、非空、是有效可执行文件且哈希与清单一致，否则直接报错而不是静默半成功。
+        FolderLock.Core.Update.Updater.VerifyStagedFile(newExecutable, expectedSha256);
 
-        File.WriteAllText(script, content);
+        var script = FolderLock.Core.Update.Updater.WriteApplyScript(
+            newExecutable,
+            current,
+            FolderLock.Core.Update.Updater.GetApplyResultPath(),
+            Environment.ProcessId);
 
         Process.Start(new ProcessStartInfo
         {
@@ -1326,6 +1388,29 @@ public partial class MainWindow : FluentWindow
 
         ExitRequested = true;
         Application.Current.Shutdown();
+    }
+
+    /// <summary>上一次替换若失败，启动后用明确的错误提示告知用户，避免“更新过了但其实没成功”。</summary>
+    private void ReportPendingUpdateFailure()
+    {
+        var result = FolderLock.Core.Update.Updater.ConsumeApplyResult();
+        if (result is null)
+        {
+            return;
+        }
+
+        if (result.StartsWith("ok", StringComparison.OrdinalIgnoreCase))
+        {
+            // 更新成功后刷新自完整性哈希，避免下次启动把新文件误判为被篡改。
+            SelfIntegrity.Refresh();
+            return;
+        }
+
+        var reason = result.Replace(Environment.NewLine, " ").Trim();
+        ShowError(new InvalidOperationException(
+            L.Current == "en"
+                ? $"The previous update did not complete; the old version is still running. ({reason}) Please check for updates again."
+                : $"上次更新未能完成，程序仍是旧版本。原因：{reason}。请重新检查更新，若反复失败请手动替换安装目录中的可执行文件。"));
     }
 
     private void ViewLogs_Click(object sender, RoutedEventArgs e)
@@ -1482,6 +1567,14 @@ public partial class MainWindow : FluentWindow
 
     private void SafetyInfo_Click(object sender, RoutedEventArgs e)
     {
+        var signatureMode = ServiceSignaturePolicy.CurrentMode == SignatureEnforcementMode.Strict
+            ? "【守护服务签名校验】严格模式：未签名、签名无效或发布者不符的 FolderLock.Service.exe 会被拒绝启动。"
+            : "【守护服务签名校验】警告模式（未强制）：服务仍会校验签名并写入 service.log，但未签名或签名无效时\n" +
+              "  只记录警告、照常启动，因此当前不具备签名保护。\n" +
+              "• 切到严格模式：设置环境变量 FOLDERLOCK_REQUIRE_SIGNATURE=1，或在\n" +
+              "  %ProgramData%\\FolderLock\\service-settings.json 写入 {\"RequireServiceSignature\": true}，\n" +
+              "  然后重启守护服务。";
+
         MessageBox.Show(
             this,
             "FolderLock 提供两种加锁方式：\n\n" +
@@ -1496,7 +1589,8 @@ public partial class MainWindow : FluentWindow
             "  跳转列表、常见对话框 MRU 及缩略图缓存。\n" +
             "• 注意：SSD 的 TRIM/磨损均衡、页面文件、系统搜索索引等仍可能\n" +
             "  残留数据副本，本工具无法彻底清除，请配合全盘加密使用。\n" +
-            "• 加解锁需要时间，大文件夹请耐心等待。",
+            "• 加解锁需要时间，大文件夹请耐心等待。\n\n" +
+            signatureMode,
             "安全说明",
             MessageBoxButton.OK,
             MessageBoxImage.Information);
