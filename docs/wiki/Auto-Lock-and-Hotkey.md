@@ -3,10 +3,11 @@
 VaultLock can lock folders for you when you step away, and provides a panic
 hotkey for immediate lockdown. All options live under **Tools → Auto-lock**.
 
-Auto-locking an **AES** folder requires the password, so VaultLock caches the
-password for the session when you unlock (the `CachePasswords` setting, on by
-default). Disable it in `settings.json` for stricter security; then only ACL
-folders participate in auto-lock.
+Auto-locking requires the password, so VaultLock caches it for the session when
+you unlock (the `CachePasswords` setting, on by default). If you disable it in
+`settings.json` for stricter security, no folder can be re-locked automatically
+(even an ACL lock needs the password); instead of failing silently, VaultLock
+shows a status-bar and tray notification asking you to lock the folder manually.
 
 ## Lock on screen lock / sign-out
 
@@ -17,13 +18,14 @@ all unlocked folders with cached passwords are locked.
 ## Lock when idle
 
 Uses `GetLastInputInfo`, polled every 20 seconds. Enable *Lock when idle for
-15 min*. When there is no keyboard/mouse input for the interval, all folders are
-locked.
+15 min*. When there is no keyboard/mouse input for the interval, all unlocked
+folders with a cached password are locked.
 
 ## Re-lock after temporary unlock
 
 Enable *Re-lock 10 min after unlock*. Each folder you unlock starts a timer; when
-it expires the folder is locked again automatically.
+it expires the folder is locked again automatically if its password is cached,
+otherwise you get the manual-lock prompt.
 
 ## Panic hotkey
 

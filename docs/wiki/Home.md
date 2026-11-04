@@ -26,7 +26,10 @@ guard service, in a clean Fluent (Windows 11 style) UI. English and 简体中文
 ## Quick start
 
 1. Download a build from [Releases](https://github.com/oMrCat/VaultLock/releases):
-   - `v1.0.0` — full build with the optional Windows Hello unlock (~35 MB).
-   - `v1.0.0-lite` — smaller build, no Windows Hello (~9 MB).
+   - `VaultLock-win-x64-unsigned-20261105.zip` — full build with the optional
+     Windows Hello unlock (~11.7 MB).
+   - `VaultLock-lite-nohello-win-x64-unsigned-20261105.zip` — smaller build,
+     no Windows Hello (~5.6 MB).
+   Both are **unsigned** builds, so SmartScreen may warn on first run.
 2. Extract and run `FolderLock.App.exe` (requires the .NET 8 Desktop Runtime).
 3. Add a folder, set a password, click **Lock**.

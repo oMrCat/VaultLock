@@ -14,19 +14,27 @@ container back to the original path and deletes the container.
 
 ## Container format
 
+New containers are written in **format v2**:
+
 ```
 magic "FLVLT1" (6 bytes)
-version u8
-flags u8          (bit0 = has recovery code, bit1 = payload is gzip-compressed)
+version u8         (2 = current, 1 = legacy, read-only)
+flags u8           (bit0 = has recovery code, bit1 = payload is gzip-compressed)
 iterations i32 LE
 saltPassword  (16)
 saltRecovery  (16)
 wrappedByPassword  (12 nonce + 32 ct + 16 tag = 60)
 wrappedByRecovery  (60)
-payload = sequence of chunks:
-    plaintextLen i32 LE   (0 = end)
+headerMac     (32)  HMAC-SHA256 keyed by the DEK over the header bytes above
+payload = sequence of 64 KiB chunks:
+    plaintextLen i32 LE   (1..65536)
     nonce (12)
     ciphertext (plaintextLen)
+    tag (16)
+end block:
+    marker i32 LE  (-1)
+    nonce (12)
+    ciphertext (16)  = chunk count (i64) + total plaintext bytes (i64)
     tag (16)
 ```
 
@@ -35,8 +43,18 @@ payload = sequence of chunks:
 - `wrappedBy*` = AES-256-GCM(KEK, DEK).
 - Each payload chunk is AES-256-GCM with the DEK; the chunk index is used as AAD
   to prevent reordering.
+- The 32-byte header MAC (keyed by the DEK) covers the flags and KDF parameters,
+  so metadata tampering is detected. Only v2 containers have it.
+- The authenticated end block records the chunk count and plaintext byte total;
+  a missing or mismatched end block means the container was truncated or tampered
+  with. Only v2 containers have it.
 - The payload is a simple stream of entries (type, relative path, timestamp,
   size, content). Relative paths are validated to prevent traversal.
+
+**Legacy v1** containers have no header MAC and end with a 4-byte zero length
+instead of the authenticated end block. They remain readable, are never written
+any more, and are **not migrated automatically**; header authentication and
+truncation detection apply to v2 only.
 
 ## Compression
 
@@ -49,7 +67,7 @@ Old containers without the flag still decrypt fine.
 **Tools → Verify / salvage vault**:
 
 1. Reads the header and reports version, iteration count, whether a recovery code
-   is present, and the container size.
+   is present, whether the payload is compressed, and the container size.
 2. Verifies the container decrypts with your password/recovery code.
 3. If verification fails, offers to **salvage** — best-effort export of
    recoverable content to a folder you choose. Salvage is limited because GCM is

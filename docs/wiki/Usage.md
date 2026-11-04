@@ -15,7 +15,8 @@ Select a folder and press **Lock** or **Unlock** (or double-click to
 unlock-and-open).
 
 - **ACL lock** is instant: it backs up the original permissions, denies access,
-  and hides the folder. Unlock restores the exact original permissions.
+  and hides the folder. Unlock re-applies the saved DACL; if another account has
+  taken ownership, recovery is manual (`takeown` + `icacls`).
 - **AES vault** operations encrypt/decrypt the whole folder and show a progress
   overlay with a **Cancel** button. Large folders take time.
 
@@ -46,18 +47,19 @@ lock time, with buttons for **Open**, **Lock**, **Unlock**, **Change password**,
 
 ## Right-click in Explorer
 
-After registering the context menu, right-click a folder to
-**Add to VaultLock**, **Lock with VaultLock**, or **Unlock with VaultLock**. The
-command is forwarded to the running instance; if the app is not running it starts
-it.
+After registering the context menu, right-click a folder for the verbs
+**添加到 FolderLock 列表**, **用 FolderLock 加锁**, or **用 FolderLock 解锁**.
+The command is forwarded to the running instance; if the app is not running it
+starts it.
 
 ## Temporary unlock
 
 Unlocking caches the password for the session so the folder can be re-locked
 automatically (idle, sign-out, or the temporary-unlock timeout). This requires
 **Cache passwords** (on by default). Disable it in `settings.json`
-(`CachePasswords: false`) for stricter security — then only ACL-locked folders
-can be auto-locked without re-entering a password.
+(`CachePasswords: false`) for stricter security — then no folder can be
+auto-locked without re-entering a password, and the app prompts you to lock it
+manually instead of failing silently.
 
 ## Panic hotkey
 

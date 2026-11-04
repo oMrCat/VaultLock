@@ -7,8 +7,9 @@ entirely. For real protection use **AES encryption**.
 
 ### What happens if I forget the password?
 For an **encrypted** folder, use the **recovery code** you saved. There is no
-other way to recover it. For an **ACL-locked** folder, you can restore access
-from the folder's *Properties → Security* page.
+other way to recover it. For an **ACL-locked** folder, Unlock re-applies the
+saved DACL; if ownership was taken over, recover manually with `takeown` +
+`icacls`.
 
 ### Where is my data stored?
 - Database, key, settings: `%APPDATA%\FolderLock\` (or `<app>\data\` in portable
@@ -20,10 +21,11 @@ from the folder's *Properties → Security* page.
 No. ACL locking never moves or deletes data. AES locking encrypts then securely
 wipes the original — that is intentional, so no plaintext copy remains.
 
-### Why is the single-file download so large?
-The full build bundles the Windows Runtime projections for the optional Windows
-Hello unlock (~35 MB). Use the **lite** release or `publish.ps1 -NoHello`
-(~9 MB) if you do not need Hello.
+### How large is the download?
+The full release zip is about 11.7 MB; it bundles the Windows Runtime
+projections for the optional Windows Hello unlock. The **lite** release or
+`publish.ps1 -NoHello` is about 5.6 MB. Both current release builds are
+**unsigned**.
 
 ### Can I lock an entire drive or my Desktop?
 No. VaultLock refuses drive roots, `Windows`, `System32`, `Program Files*`,
@@ -48,5 +50,7 @@ Yes — drop a `portable.flag` file next to the executable.
 
 ### How do I update it?
 *Tools → Check for updates* reads a manifest URL you configure in
-`settings.json` (`UpdateUrl`). Otherwise download a newer release and replace the
-executable; your data and vaults stay.
+`settings.json` (`UpdateUrl`). The manifest must use HTTPS and provide a
+64-character SHA-256; the downloaded package must also pass Authenticode
+signature verification, so unsigned updates are rejected by default. Otherwise
+download a newer release and replace the executable; your data and vaults stay.

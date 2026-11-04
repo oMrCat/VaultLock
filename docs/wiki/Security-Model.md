@@ -3,10 +3,15 @@
 ## Two locking modes
 
 ### ACL lock
-- Backs up the folder's security descriptor (SDDL), then replaces the DACL with
-  a deny-everyone rule (keeping SYSTEM/Administrators out of the way via owner
-  rights) and sets `Hidden` + `System` attributes.
-- Unlock restores the exact original SDDL and clears the attributes.
+- Before locking, checks `WRITE_DAC` and refuses with an explicit message if it
+  is missing, so a one-way lock cannot be created.
+- Backs up the folder's access-section security descriptor (SDDL), then replaces
+  the DACL with a deny-everyone rule, blocks inheritance and sets `Hidden` +
+  `System` attributes.
+- Unlock re-applies the saved DACL and restores the original `Hidden` / `System`
+  attributes; it is not a byte-for-byte rollback. If another account has taken
+  ownership, automatic unlock fails and you must recover manually with
+  `takeown` + `icacls`.
 - **Protects against:** other standard users on the same PC and casual access.
 - **Does not protect against:** administrators (who can take ownership), SYSTEM,
   Safe Mode, or another OS.
@@ -18,6 +23,10 @@
   password and by the recovery code — so either can unlock.
 - Each 64 KiB chunk is separately AES-256-GCM authenticated; chunks are bound to
   their order via AAD.
+- New containers use format **v2**, with an authenticated header (HMAC-SHA256
+  keyed by the DEK) and an authenticated end block, so metadata tampering and
+  truncation are detected. Legacy **v1** containers are readable but read-only
+  and are **not migrated automatically**.
 - **Protects against:** offline access, copying the disk, and administrators.
 - **Does not protect against:** malware running as you while the folder is
   unlocked, or a cold-boot/evil-maid attacker.
@@ -62,9 +71,10 @@ Connection pooling is disabled so a keyed connection is never reused across keys
 ## Trace cleaning (after AES lock)
 
 - Source files are overwritten with random data, truncated, renamed, and deleted.
-- Explorer **Recent** shortcuts and jump lists, common MRU registry keys
-  (`RecentDocs`, `TypedPaths`, `RunMRU`, `ComDlg32`, …), and thumbnail/icon
-  caches are cleaned for the folder.
+- Explorer **Recent** shortcuts and jump lists, and common MRU registry keys
+  (`RecentDocs`, `TypedPaths`, `RunMRU`, `ComDlg32`, …) are cleaned for the
+  folder. Shared thumbnail/icon caches are cleaned only when
+  `CleanExplorerCaches` is enabled (off by default).
 
 **Honest limitations:** on SSDs, TRIM / wear-levelling, the page file, and the
 Windows Search index may retain copies. Secure deletion is best-effort; use

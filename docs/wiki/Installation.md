@@ -5,17 +5,17 @@
 - Windows 10 1809+ or Windows 11 (x64).
 - [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0)
   (the releases are framework-dependent).
-- Administrator rights only for the optional **guard service** and for
-  registering a per-machine shell extension.
+- Administrator rights only for installing the optional **guard service**. The
+  app itself and the per-user Explorer context menu do not need elevation.
 
 ## From a release (recommended)
 
 1. Open [Releases](https://github.com/oMrCat/VaultLock/releases).
 2. Pick a build:
-   - **`v1.0.0`** — full build, includes the optional Windows Hello unlock gate
-     (larger single file, ~35 MB).
-   - **`v1.0.0-lite`** — no Windows Hello (smaller, ~9 MB). All other features
-     are identical.
+   - **`VaultLock-win-x64-unsigned-20261105.zip`** — full build, includes the
+     optional Windows Hello unlock gate (~11.7 MB download).
+   - **`VaultLock-lite-nohello-win-x64-unsigned-20261105.zip`** — no Windows
+     Hello (~5.6 MB download). All other features are identical.
 3. Download the `.zip`, extract it somewhere (e.g. `C:\Tools\VaultLock`).
 4. Run `FolderLock.App.exe`.
 

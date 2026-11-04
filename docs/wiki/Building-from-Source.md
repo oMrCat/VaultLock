@@ -39,17 +39,18 @@ dotnet build src\FolderLock.App\FolderLock.App.csproj -p:FolderLockHello=false
 ## Publishing
 
 ```powershell
-# full build (~35 MB single file)
+# full build (single-file, Windows Hello)
 .\installer\publish.ps1
 
-# small build, no Windows Hello (~9 MB)
+# small build, no Windows Hello
 .\installer\publish.ps1 -NoHello
 
 # optional code signing (signtool must be on PATH)
 .\installer\publish.ps1 -Sign -Thumbprint <thumbprint>
 ```
 
-Output: `src\FolderLock.App\bin\Release\<tfm>\publish\win-x64\`.
+Output: `artifacts\publish\win-x64\` (contains `FolderLock.App.exe` and
+`FolderLock.Service.exe`).
 
 ## 代码签名
 
