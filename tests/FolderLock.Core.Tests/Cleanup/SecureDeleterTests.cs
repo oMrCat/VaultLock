@@ -129,6 +129,37 @@ public sealed class TraceCleanerTests : IDisposable
         Assert.Equal(0, removed);
     }
 
+    [Fact]
+    public void CleanSharedCacheFiles_SkipsSharedCachesByDefault()
+    {
+        var thumb = Path.Combine(_root, "thumbcache_1.db");
+        var icon = Path.Combine(_root, "iconcache_1.db");
+        File.WriteAllText(thumb, "x");
+        File.WriteAllText(icon, "x");
+        var result = new TraceCleanResult();
+
+        var removed = TraceCleaner.CleanSharedCacheFiles(new[] { thumb, icon }, allowDelete: false, result);
+
+        Assert.Equal(0, removed);
+        Assert.True(File.Exists(thumb));
+        Assert.True(File.Exists(icon));
+        Assert.Contains(result.Notes, note => note.Contains("默认未清理"));
+    }
+
+    [Fact]
+    public void CleanSharedCacheFiles_DeletesOnlyWhenExplicitlyAllowed()
+    {
+        var thumb = Path.Combine(_root, "thumbcache_2.db");
+        File.WriteAllText(thumb, "x");
+        var result = new TraceCleanResult();
+
+        var removed = TraceCleaner.CleanSharedCacheFiles(new[] { thumb }, allowDelete: true, result);
+
+        Assert.Equal(1, removed);
+        Assert.False(File.Exists(thumb));
+        Assert.DoesNotContain(result.Notes, note => note.Contains("默认未清理"));
+    }
+
     public void Dispose()
     {
         try

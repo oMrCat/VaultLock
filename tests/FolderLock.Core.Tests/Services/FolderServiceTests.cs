@@ -20,7 +20,10 @@ public sealed class FolderServiceTests : IDisposable
         File.WriteAllText(Path.Combine(_folder, "data.txt"), "content");
 
         var dbPath = Path.Combine(_root, "folderlock.db");
-        _service = new FolderService(new FolderStore(dbPath), new FolderLocker());
+        _service = new FolderService(
+            new FolderStore(dbPath),
+            new FolderLocker(),
+            watchlist: new WatchlistStore(Path.Combine(_root, "watchlist.json")));
     }
 
     [Fact]
@@ -126,7 +129,13 @@ public sealed class FolderServiceTests : IDisposable
             {
                 try
                 {
-                    new FolderLocker().Unlock(record.Path, new SecurityBackup(record.DaclSddl, record.AccessRulesProtected));
+                    new FolderLocker().Unlock(
+                        record.Path,
+                        new SecurityBackup(
+                            record.DaclSddl,
+                            record.AccessRulesProtected,
+                            record.OwnerSid,
+                            record.OriginalAttributes));
                 }
                 catch
                 {

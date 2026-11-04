@@ -19,7 +19,10 @@ public sealed class FolderServiceSecurityTests : IDisposable
         Directory.CreateDirectory(_folder);
         File.WriteAllText(Path.Combine(_folder, "a.txt"), "x");
 
-        _service = new FolderService(new FolderStore(Path.Combine(_root, "db.sqlite")), new FolderLocker());
+        _service = new FolderService(
+            new FolderStore(Path.Combine(_root, "db.sqlite")),
+            new FolderLocker(),
+            watchlist: new WatchlistStore(Path.Combine(_root, "watchlist.json")));
     }
 
     [Fact]

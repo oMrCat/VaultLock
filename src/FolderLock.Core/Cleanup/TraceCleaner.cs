@@ -33,7 +33,12 @@ public sealed class TraceCleaner
         @"Software\Microsoft\Windows\CurrentVersion\Explorer\ComDlg32\CIDSizeMRU",
     };
 
-    public TraceCleanResult Clean(string folderPath)
+    /// <summary>
+    /// 清理与指定文件夹相关的痕迹。
+    /// <paramref name="cleanSharedIconCaches"/> 为 false 时不会删除系统共享的缩略图/图标缓存
+    /// （这些文件同时缓存其它文件夹的图标，删除会影响整个用户会话），只会记录提示。
+    /// </summary>
+    public TraceCleanResult Clean(string folderPath, bool cleanSharedIconCaches = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(folderPath);
 
@@ -42,7 +47,7 @@ public sealed class TraceCleaner
 
         result.ShortcutsRemoved = RemoveRecentItems(GetRecentDirectories(), path);
         result.RegistryValuesRemoved = CleanRegistry(path);
-        result.CacheFilesRemoved = CleanCaches(result);
+        result.CacheFilesRemoved = CleanCaches(result, cleanSharedIconCaches);
 
         return result;
     }
@@ -153,46 +158,50 @@ public sealed class TraceCleaner
         return removed;
     }
 
-    private static int CleanCaches(TraceCleanResult result)
+    private static int CleanCaches(TraceCleanResult result, bool cleanSharedIconCaches)
     {
-        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        var explorer = Path.Combine(localAppData, "Microsoft", "Windows", "Explorer");
+        return CleanSharedCacheFiles(EnumerateSharedCacheFiles(), cleanSharedIconCaches, result);
+    }
+
+    /// <summary>
+    /// 处理系统共享的缩略图/图标缓存。默认只统计并提示，不删除；只有显式允许时才删除。
+    /// </summary>
+    public static int CleanSharedCacheFiles(
+        IEnumerable<string> files,
+        bool allowDelete,
+        TraceCleanResult result)
+    {
+        ArgumentNullException.ThrowIfNull(files);
+        ArgumentNullException.ThrowIfNull(result);
+
         var removed = 0;
         var locked = 0;
+        var skipped = 0;
 
-        foreach (var pattern in new[] { "thumbcache_*.db", "iconcache_*.db" })
+        foreach (var file in files.Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            if (!Directory.Exists(explorer))
+            if (!allowDelete)
             {
+                skipped++;
                 continue;
             }
 
-            foreach (var file in Directory.EnumerateFiles(explorer, pattern))
+            try
             {
-                try
-                {
-                    File.Delete(file);
-                    removed++;
-                }
-                catch
-                {
-                    locked++;
-                }
+                File.Delete(file);
+                removed++;
+            }
+            catch
+            {
+                locked++;
             }
         }
 
-        var iconCache = Path.Combine(localAppData, "IconCache.db");
-        try
+        if (skipped > 0)
         {
-            if (File.Exists(iconCache))
-            {
-                File.Delete(iconCache);
-                removed++;
-            }
-        }
-        catch
-        {
-            locked++;
+            result.Notes.Add(
+                $"检测到 {skipped} 个系统共享缩略图/图标缓存文件，默认未清理（清理会影响所有文件夹的缓存）。" +
+                "如确认需要，请在 settings.json 中将 CleanExplorerCaches 设为 true。");
         }
 
         if (locked > 0)
@@ -201,6 +210,29 @@ public sealed class TraceCleaner
         }
 
         return removed;
+    }
+
+    private static IEnumerable<string> EnumerateSharedCacheFiles()
+    {
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var explorer = Path.Combine(localAppData, "Microsoft", "Windows", "Explorer");
+
+        if (Directory.Exists(explorer))
+        {
+            foreach (var pattern in new[] { "thumbcache_*.db", "iconcache_*.db" })
+            {
+                foreach (var file in Directory.EnumerateFiles(explorer, pattern))
+                {
+                    yield return file;
+                }
+            }
+        }
+
+        var iconCache = Path.Combine(localAppData, "IconCache.db");
+        if (File.Exists(iconCache))
+        {
+            yield return iconCache;
+        }
     }
 
     private static IEnumerable<string> GetRecentDirectories()

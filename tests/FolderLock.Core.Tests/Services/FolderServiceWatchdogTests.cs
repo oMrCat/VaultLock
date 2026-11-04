@@ -20,7 +20,10 @@ public sealed class FolderServiceWatchdogTests : IDisposable
         Directory.CreateDirectory(_folder);
         File.WriteAllText(Path.Combine(_folder, "data.txt"), "content");
 
-        _service = new FolderService(new FolderStore(Path.Combine(_root, "folderlock.db")), new FolderLocker());
+        _service = new FolderService(
+            new FolderStore(Path.Combine(_root, "folderlock.db")),
+            new FolderLocker(),
+            watchlist: new WatchlistStore(Path.Combine(_root, "watchlist.json")));
     }
 
     [Fact]

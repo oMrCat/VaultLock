@@ -38,10 +38,7 @@ public class PathGuardTests
     public void ProtectedRootsAreBlocked(Environment.SpecialFolder folder)
     {
         var path = Environment.GetFolderPath(folder);
-        if (string.IsNullOrWhiteSpace(path))
-        {
-            return;
-        }
+        Assert.False(string.IsNullOrWhiteSpace(path), $"当前环境缺少 {folder} 路径，无法验证保护规则。");
 
         Assert.True(PathGuard.TryGetBlockReason(path, out _));
     }
@@ -50,10 +47,7 @@ public class PathGuardTests
     public void FolderInsideWindowsIsBlocked()
     {
         var windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
-        if (string.IsNullOrWhiteSpace(windows))
-        {
-            return;
-        }
+        Assert.False(string.IsNullOrWhiteSpace(windows), "当前环境缺少 Windows 目录，无法验证保护规则。");
 
         Assert.True(PathGuard.TryGetBlockReason(Path.Combine(windows, "System32"), out _));
     }
@@ -63,22 +57,15 @@ public class PathGuardTests
     {
         var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var parent = Directory.GetParent(profile);
-        if (parent is null)
-        {
-            return;
-        }
-
-        Assert.True(PathGuard.TryGetBlockReason(parent.FullName, out _));
+        Assert.NotNull(parent);
+        Assert.True(PathGuard.TryGetBlockReason(parent!.FullName, out _));
     }
 
     [Fact]
     public void EnsureLockableThrowsForProtectedPath()
     {
         var windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
-        if (string.IsNullOrWhiteSpace(windows))
-        {
-            return;
-        }
+        Assert.False(string.IsNullOrWhiteSpace(windows), "当前环境缺少 Windows 目录，无法验证保护规则。");
 
         Assert.Throws<FolderLockException>(() => PathGuard.EnsureLockable(windows));
     }

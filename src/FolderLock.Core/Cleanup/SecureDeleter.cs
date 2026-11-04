@@ -1,4 +1,6 @@
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using Microsoft.Win32.SafeHandles;
 
 namespace FolderLock.Core.Cleanup;
 
@@ -13,6 +15,10 @@ public sealed class SecureDeleter
         _randomPasses = Math.Max(1, randomPasses);
     }
 
+    /// <summary>
+    /// 擦除单个文件。符号链接只删除链接本身；硬链接（NumberOfLinks &gt; 1）不覆写内容，
+    /// 因为覆写会同时破坏其他链接指向的数据，只删除当前目录项。
+    /// </summary>
     public void DeleteFile(string path)
     {
         if (!File.Exists(path))
@@ -20,7 +26,21 @@ public sealed class SecureDeleter
             return;
         }
 
+        var attributes = File.GetAttributes(path);
+        if (attributes.HasFlag(FileAttributes.ReparsePoint))
+        {
+            File.Delete(path);
+            return;
+        }
+
         File.SetAttributes(path, FileAttributes.Normal);
+
+        if (HasMultipleHardLinks(path))
+        {
+            File.Delete(path);
+            return;
+        }
+
         var length = new FileInfo(path).Length;
 
         using (var stream = new FileStream(
@@ -84,6 +104,10 @@ public sealed class SecureDeleter
         File.Delete(scrambled);
     }
 
+    /// <summary>
+    /// 递归删除目录；不跟随 reparse point（目录联接/符号链接），遇到时只删除链接本身。
+    /// 子项删除失败会先继续处理其余项，最后聚合抛错，避免“静默半删除”。
+    /// </summary>
     public void DeleteDirectory(string path)
     {
         if (!Directory.Exists(path))
@@ -91,29 +115,111 @@ public sealed class SecureDeleter
             return;
         }
 
-        foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+        var failures = new List<Exception>();
+        DeleteDirectoryContents(path, failures);
+
+        try
         {
-            try
-            {
-                DeleteFile(file);
-            }
-            catch
-            {
-            }
+            Directory.Delete(path, recursive: false);
+        }
+        catch (Exception ex)
+        {
+            failures.Add(ex);
         }
 
-        foreach (var directory in Directory.EnumerateDirectories(path, "*", SearchOption.AllDirectories)
-                     .OrderByDescending(d => d.Length))
+        if (failures.Count > 0)
         {
-            try
-            {
-                Directory.Delete(directory, recursive: false);
-            }
-            catch
-            {
-            }
+            throw new AggregateException($"安全擦除 {path} 时有 {failures.Count} 项失败。", failures);
         }
-
-        Directory.Delete(path, recursive: true);
     }
+
+    private void DeleteDirectoryContents(string path, List<Exception> failures)
+    {
+        if (new DirectoryInfo(path).Attributes.HasFlag(FileAttributes.ReparsePoint))
+        {
+            return;
+        }
+
+        foreach (var entry in Directory.EnumerateFileSystemEntries(path))
+        {
+            try
+            {
+                var info = new DirectoryInfo(entry);
+
+                if (info.Attributes.HasFlag(FileAttributes.Directory))
+                {
+                    if (info.Attributes.HasFlag(FileAttributes.ReparsePoint))
+                    {
+                        // 目录联接/符号链接：只删除链接，不进入目标。
+                        Directory.Delete(entry, recursive: false);
+                        continue;
+                    }
+
+                    DeleteDirectoryContents(entry, failures);
+
+                    try
+                    {
+                        Directory.Delete(entry, recursive: false);
+                    }
+                    catch (Exception ex)
+                    {
+                        failures.Add(ex);
+                    }
+
+                    continue;
+                }
+
+                DeleteFile(entry);
+            }
+            catch (Exception ex)
+            {
+                failures.Add(ex);
+            }
+        }
+    }
+
+    private static bool HasMultipleHardLinks(string path)
+    {
+        try
+        {
+            using var handle = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            if (!GetFileInformationByHandle(handle.SafeFileHandle, out var info))
+            {
+                return false;
+            }
+
+            return info.NumberOfLinks > 1;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public FileCreationTime CreationTime;
+        public FileCreationTime LastAccessTime;
+        public FileCreationTime LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileCreationTime
+    {
+        public uint LowDateTime;
+        public uint HighDateTime;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(
+        SafeFileHandle handle,
+        out ByHandleFileInformation information);
 }

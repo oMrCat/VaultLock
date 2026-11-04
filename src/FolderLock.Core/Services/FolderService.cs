@@ -45,7 +45,19 @@ public sealed class FolderService
 
     public TraceCleanResult? LastTraceClean { get; private set; }
 
+    /// <summary>最后一次写入 watchlist 的错误；为空表示写入成功或未尝试。</summary>
+    public string? LastWatchlistError { get; private set; }
+
+    /// <summary>最后一次同步状态时无法判定的目录（权限/IO 异常）。</summary>
+    public IReadOnlyList<string> LastUnknownPaths { get; private set; } = Array.Empty<string>();
+
+    /// <summary>最后一次加密时因符号链接/目录联接而未进入容器的条目（相对路径）。</summary>
+    public IReadOnlyList<string> LastSkippedVaultEntries { get; private set; } = Array.Empty<string>();
+
     public bool CompressVaults { get; set; } = true;
+
+    /// <summary>是否清理系统共享的缩略图/图标缓存（默认关闭，避免影响所有文件夹）。</summary>
+    public bool CleanExplorerCaches { get; set; }
 
     public IReadOnlyList<FolderRecord> GetAll() => _store.GetAll();
 
@@ -125,6 +137,7 @@ public sealed class FolderService
         ArgumentNullException.ThrowIfNull(password);
 
         LastTraceClean = null;
+        LastSkippedVaultEntries = Array.Empty<string>();
         var record = Require(id);
 
         try
@@ -136,6 +149,9 @@ public sealed class FolderService
                 throw new FolderLockException("该文件夹已处于锁定状态。");
             }
 
+            // 恢复包（.flkit）可能带入任意路径，锁定/加密前必须重新校验，避免对系统目录等执行 ACL 锁定或整目录加密。
+            PathGuard.EnsureLockable(record.Path);
+
             if (record.EncryptionMode == EncryptionMode.Aes256Gcm)
             {
                 LockEncrypted(record, password.Span, progress, cancellationToken);
@@ -146,7 +162,10 @@ public sealed class FolderService
             }
 
             UpdateWatchlist();
-            Audit(AuditAction.Lock, record, true, record.EncryptionMode.ToString());
+            var detail = LastSkippedVaultEntries.Count == 0
+                ? record.EncryptionMode.ToString()
+                : $"{record.EncryptionMode}；{LastSkippedVaultEntries.Count} 项链接/联接点未加密";
+            Audit(AuditAction.Lock, record, true, detail);
         }
         catch (Exception ex)
         {
@@ -314,15 +333,23 @@ public sealed class FolderService
 
             try
             {
-                if (!_locker.IsLocked(record.Path))
+                switch (_locker.GetLockState(record.Path))
                 {
-                    _locker.Lock(record.Path);
-                    restored = true;
-                    Audit(AuditAction.AutoRelock, record, true);
+                    case FolderLockState.Locked:
+                        break;
+                    case FolderLockState.Unknown:
+                        Audit(AuditAction.AutoRelock, record, false, "锁定状态未知（权限/IO 异常），已跳过");
+                        break;
+                    default:
+                        _locker.Lock(record.Path);
+                        restored = true;
+                        Audit(AuditAction.AutoRelock, record, true);
+                        break;
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                Audit(AuditAction.AutoRelock, record, false, ex.Message);
             }
         }
 
@@ -475,6 +502,8 @@ public sealed class FolderService
 
     public void UpdateWatchlist()
     {
+        LastWatchlistError = null;
+
         try
         {
             var paths = _store.GetAll()
@@ -483,16 +512,22 @@ public sealed class FolderService
 
             _watchlist.Save(paths);
         }
-        catch
+        catch (Exception ex)
         {
+            // 不打断已完成的锁定/解锁，但绝不能让写入失败变成静默失败：
+            // 记录错误并由 UI/调用方展示，同时写审计。
+            LastWatchlistError = ex.Message;
+            Audit(AuditAction.WatchlistSync, null, false, $"监控列表写入失败：{ex.Message}");
         }
     }
 
     public void SyncLockStates()
     {
+        var unknown = new List<string>();
+
         foreach (var record in _store.GetAll())
         {
-            bool actual;
+            bool? actual;
             if (record.EncryptionMode == EncryptionMode.Aes256Gcm)
             {
                 actual = record.VaultPath is not null && File.Exists(record.VaultPath);
@@ -501,21 +536,35 @@ public sealed class FolderService
             {
                 try
                 {
-                    actual = _locker.IsLocked(record.Path);
+                    actual = _locker.GetLockState(record.Path) switch
+                    {
+                        FolderLockState.Locked => true,
+                        FolderLockState.Unlocked => false,
+                        _ => null,
+                    };
                 }
-                catch
+                catch (Exception ex)
                 {
+                    actual = null;
+                    unknown.Add($"{record.Path}（{ex.Message}）");
                     continue;
                 }
             }
 
+            if (actual is null)
+            {
+                unknown.Add(record.Path);
+                continue;
+            }
+
             if (actual != record.IsLocked)
             {
-                record.IsLocked = actual;
+                record.IsLocked = actual.Value;
                 _store.Update(record);
             }
         }
 
+        LastUnknownPaths = unknown;
         UpdateWatchlist();
     }
 
@@ -529,15 +578,31 @@ public sealed class FolderService
         SecurityBackup backup;
         try
         {
-            backup = _locker.Lock(record.Path);
+            backup = _locker.CaptureBackup(record.Path);
         }
         catch (Exception ex) when (ex is not FolderLockException)
         {
             throw new FolderLockException($"锁定失败：{ex.Message}", ex);
         }
 
+        // 先把权限备份落库，再真正修改 ACL：即使改权限后崩溃，
+        // 下次启动也能用已保存的 DACL 恢复，不会出现“锁住了但没有备份”。
         record.DaclSddl = backup.DaclSddl;
         record.AccessRulesProtected = backup.AccessRulesProtected;
+        record.OwnerSid = backup.OwnerSid;
+        record.OriginalAttributes = backup.OriginalAttributes;
+        record.IsLocked = false;
+        _store.Update(record);
+
+        try
+        {
+            _locker.ApplyLock(record.Path, backup);
+        }
+        catch (Exception ex) when (ex is not FolderLockException)
+        {
+            throw new FolderLockException($"锁定失败：{ex.Message}", ex);
+        }
+
         record.IsLocked = true;
         record.LastLockedAt = DateTimeOffset.UtcNow;
         _store.Update(record);
@@ -552,7 +617,17 @@ public sealed class FolderService
 
         try
         {
-            _locker.Unlock(record.Path, new SecurityBackup(record.DaclSddl, record.AccessRulesProtected));
+            _locker.Unlock(
+                record.Path,
+                new SecurityBackup(
+                    record.DaclSddl,
+                    record.AccessRulesProtected,
+                    record.OwnerSid,
+                    record.OriginalAttributes));
+        }
+        catch (FolderLockAccessException ex)
+        {
+            throw new FolderLockException(BuildUnlockRecoveryMessage(record, ex), ex);
         }
         catch (Exception ex) when (ex is not FolderLockException)
         {
@@ -561,6 +636,19 @@ public sealed class FolderService
 
         record.IsLocked = false;
         _store.Update(record);
+    }
+
+    private static string BuildUnlockRecoveryMessage(FolderRecord record, FolderLockAccessException exception)
+    {
+        var owner = record.OwnerSid ?? "未知";
+        return
+            $"解锁失败：目录“{record.Path}”的所有权或权限已被接管，当前进程没有 WRITE_DAC，无法自动恢复。\n" +
+            $"加锁时记录的目录所有者 SID：{owner}。\n" +
+            "可按以下步骤手动恢复：\n" +
+            $"1) 以管理员打开命令提示符，执行：takeown /f \"{record.Path}\" /r /d y\n" +
+            $"2) 再执行：icacls \"{record.Path}\" /reset /T /C\n" +
+            "3) 回到 FolderLock 重新解锁；若仍失败，请用恢复套件/管理员恢复原 DACL。\n" +
+            $"（原始错误：{exception.Message}）";
     }
 
     private void LockEncrypted(
@@ -583,6 +671,8 @@ public sealed class FolderService
             ? null
             : SecretProtector.Unprotect(record.ProtectedRecoveryCode);
 
+        var created = false;
+        var report = new VaultEncryptionReport();
         try
         {
             _vault.EncryptDirectory(
@@ -593,21 +683,41 @@ public sealed class FolderService
                 PasswordHasher.DefaultIterations,
                 progress,
                 cancellationToken,
-                compress: CompressVaults);
+                compress: CompressVaults,
+                overwrite: false,
+                report: report);
 
+            created = true;
             cancellationToken.ThrowIfCancellationRequested();
             _vault.Verify(vaultPath, password);
         }
         catch (OperationCanceledException)
         {
-            TryDeleteVault(vaultPath);
+            if (created)
+            {
+                TryDeleteVault(vaultPath);
+            }
+
             throw;
         }
         catch (Exception ex) when (ex is not FolderLockException)
         {
-            TryDeleteVault(vaultPath);
+            // 只有本次确实新建了容器才清理，避免把上一次残留的完整容器误删。
+            if (created)
+            {
+                TryDeleteVault(vaultPath);
+            }
+
             throw new FolderLockException($"加密失败：{ex.Message}", ex);
         }
+
+        // 先落库再擦除：擦除阶段中途失败时，容器仍是唯一完整副本，
+        // 若此时记录仍为“未锁定”，用户重试锁定会以残缺目录覆盖容器造成永久数据丢失。
+        record.VaultPath = vaultPath;
+        record.IsLocked = true;
+        record.LastLockedAt = DateTimeOffset.UtcNow;
+        _store.Update(record);
+        LastSkippedVaultEntries = report.SkippedEntries.ToArray();
 
         try
         {
@@ -616,23 +726,19 @@ public sealed class FolderService
         catch (Exception ex)
         {
             throw new FolderLockException(
-                $"内容已加密到 {vaultPath}，但原文件夹无法安全擦除（可能被占用）。请关闭占用程序后重试。",
+                $"内容已完整加密到 {vaultPath}，但原文件夹无法安全擦除（可能被占用）。记录已标记为锁定，请勿重复锁定；" +
+                "关闭占用程序后可先用“校验/救援”功能还原，或手动删除残留目录后再解锁。",
                 ex);
         }
 
         try
         {
-            LastTraceClean = _traceCleaner.Clean(record.Path);
+            LastTraceClean = _traceCleaner.Clean(record.Path, CleanExplorerCaches);
         }
         catch
         {
             LastTraceClean = null;
         }
-
-        record.VaultPath = vaultPath;
-        record.IsLocked = true;
-        record.LastLockedAt = DateTimeOffset.UtcNow;
-        _store.Update(record);
     }
 
     private void UnlockEncrypted(
@@ -667,6 +773,12 @@ public sealed class FolderService
             TryDeleteDirectory(record.Path);
             throw new FolderLockException("密码或恢复码不正确，或加密容器已损坏。", ex);
         }
+        catch (Exception ex) when (ex is not FolderLockException)
+        {
+            // 解密中途的任何异常（磁盘满、路径冲突等）都可能留下部分明文，必须清理。
+            TryDeleteDirectory(record.Path);
+            throw new FolderLockException($"解密失败：{ex.Message}", ex);
+        }
 
         TryDeleteVault(record.VaultPath);
         record.IsLocked = false;
@@ -681,22 +793,26 @@ public sealed class FolderService
             {
                 File.Delete(vaultPath);
             }
-
-            if (File.Exists(vaultPath + ".tmp"))
-            {
-                File.Delete(vaultPath + ".tmp");
-            }
         }
         catch
         {
         }
     }
 
-    private static void TryDeleteDirectory(string path)
+    private void TryDeleteDirectory(string path)
     {
         try
         {
-            if (Directory.Exists(path))
+            if (!Directory.Exists(path))
+            {
+                return;
+            }
+
+            try
+            {
+                _secureDeleter.DeleteDirectory(path);
+            }
+            catch
             {
                 Directory.Delete(path, recursive: true);
             }
