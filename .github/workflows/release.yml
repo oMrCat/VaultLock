@@ -39,18 +39,49 @@ jobs:
           dotnet publish src/FolderLock.Service/FolderLock.Service.csproj
           -c Release -r win-x64 --self-contained false -o publish/service
 
-      - name: Stage and package
+      - name: Prepare signing certificate (optional)
+        id: signing
+        shell: pwsh
+        env:
+          CODE_SIGN_PFX_BASE64: ${{ secrets.CODE_SIGN_PFX_BASE64 }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CODE_SIGN_PFX_BASE64)) {
+            "enabled=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            Write-Host "::notice title=Code signing skipped::未配置 CODE_SIGN_PFX_BASE64，本次发布未签名（守护服务会拒绝启动）。"
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CODE_SIGN_PFX_BASE64))
+          "enabled=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "CODE_SIGN_PFX=$pfx" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Stage
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $tag = "${{ github.ref_name }}"
-          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
-
           Copy-Item publish/service/FolderLock.Service.exe publish/full/
           Copy-Item publish/service/FolderLock.Service.exe publish/lite/
 
           Copy-Item README.md, LICENSE publish/full/
           Copy-Item README.md, LICENSE publish/lite/
+
+      # 签名失败会让 sign.ps1 以非零码退出，从而中止整个发布，不会产出签名错误的包。
+      - name: Sign binaries
+        if: steps.signing.outputs.enabled == 'true'
+        shell: pwsh
+        env:
+          CODE_SIGN_PFX_PASSWORD: ${{ secrets.CODE_SIGN_PFX_PASSWORD }}
+        run: |
+          .\installer\sign.ps1 -PfxPath $env:CODE_SIGN_PFX -PublishDirectory "publish\full"
+          .\installer\sign.ps1 -PfxPath $env:CODE_SIGN_PFX -PublishDirectory "publish\lite"
+          Remove-Item -LiteralPath $env:CODE_SIGN_PFX -Force
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = "${{ github.ref_name }}"
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
 
           Compress-Archive -Path publish/full/* -DestinationPath "artifacts/VaultLock-$tag-win-x64.zip" -Force
           Compress-Archive -Path publish/lite/* -DestinationPath "artifacts/VaultLock-$tag-lite-win-x64.zip" -Force

@@ -1,0 +1,60 @@
+name: PR quality gate
+
+on:
+  pull_request:
+    branches: [master, main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Cache NuGet
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\NuGet\Cache
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/Directory.Build.props') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Restore
+        run: dotnet restore FolderLock.sln
+
+      - name: Build
+        run: dotnet build FolderLock.sln -c Release --no-restore -warnaserror
+
+      - name: Test
+        run: dotnet test FolderLock.sln -c Release --no-build --logger "trx;LogFileName=test-results.trx"
+
+      - name: Format check
+        run: dotnet format FolderLock.sln --verify-no-changes --no-restore --verbosity minimal
+
+      - name: Vulnerable dependencies
+        run: |
+          dotnet list FolderLock.sln package --vulnerable --include-transitive 2>&1 | Tee-Object -FilePath vulnerable.txt
+          $report = Get-Content vulnerable.txt -Raw
+          if ($report -match 'has the following vulnerable packages') {
+            Write-Error "检测到存在已知漏洞的依赖，请升级后重试。"
+          }
+
+      # 签名步骤占位：PR 只检查密钥是否可用，不实际签名，缺失密钥时明确提示且不影响门禁。
+      - name: Code signing availability (optional)
+        shell: pwsh
+        env:
+          CODE_SIGN_PFX_BASE64: ${{ secrets.CODE_SIGN_PFX_BASE64 }}
+          CODE_SIGN_THUMBPRINT: ${{ secrets.CODE_SIGN_THUMBPRINT }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CODE_SIGN_PFX_BASE64) -and
+              [string]::IsNullOrWhiteSpace($env:CODE_SIGN_THUMBPRINT)) {
+            Write-Host "::notice title=Code signing skipped::未配置 CODE_SIGN_PFX_BASE64（或 CODE_SIGN_THUMBPRINT），跳过签名。PR 门禁不依赖签名密钥。"
+            exit 0
+          }
+          Write-Host "已检测到签名密钥。发布流水线将调用 installer\sign.ps1（RFC3161 时间戳 + 签名后校验）。"
