@@ -1,5 +1,6 @@
-param(
-    [string]$ServiceExe = ""
+﻿param(
+    [string]$ServiceExe = "",
+    [string]$ServiceName = "FolderLockGuard"
 )
 
 $ErrorActionPreference = "Stop"
@@ -10,17 +11,17 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 }
 
 if ([string]::IsNullOrWhiteSpace($ServiceExe)) {
-    $ServiceExe = Join-Path $PSScriptRoot "..\src\FolderLock.App\bin\Release\net8.0-windows\publish\win-x64\FolderLock.Service.exe"
+    $ServiceExe = Join-Path $PSScriptRoot "..\artifacts\publish\win-x64\FolderLock.Service.exe"
 }
 
 $ServiceExe = (Resolve-Path $ServiceExe).Path
-$name = "FolderLockGuard"
+$name = $ServiceName
 
 sc.exe stop $name 2>$null | Out-Null
 sc.exe delete $name 2>$null | Out-Null
 
-sc.exe create $name binPath= "$ServiceExe" start= auto DisplayName= "FolderLock 守护服务"
-sc.exe description $name "监控并自动恢复 FolderLock 的文件夹锁定。"
+sc.exe create $name binPath= "`"$ServiceExe`"" start= auto obj= "NT AUTHORITY\LocalService" DisplayName= "FolderLock 守护服务"
+sc.exe description $name "监控并自动恢复 FolderLock 的文件夹锁定（LocalService 低权限账户运行）。"
 sc.exe failure $name reset= 86400 actions= restart/5000/restart/5000/restart/5000
 sc.exe start $name
 

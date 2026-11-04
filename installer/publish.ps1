@@ -1,7 +1,14 @@
-param(
+﻿param(
     [string]$Configuration = "Release",
-    [string]$CertThumbprint = "",
+    [switch]$Sign,
+    [string]$Thumbprint = "",
+    [string]$PfxPath = "",
+    [string]$PfxPassword = "",
     [string]$TimestampUrl = "http://timestamp.digicert.com",
+    [string]$ExpectedPublisher = "",
+    [string]$SigntoolPath = "",
+    # 仅用于本地验证自签名证书：允许证书链不受信任的签名通过校验。正式发布不要使用。
+    [switch]$AllowUntrustedChain,
     [switch]$NoHello
 )
 
@@ -12,8 +19,10 @@ $appProject = Join-Path $root "src\FolderLock.App\FolderLock.App.csproj"
 $serviceProject = Join-Path $root "src\FolderLock.Service\FolderLock.Service.csproj"
 
 $helloFlag = "-p:FolderLockHello=$(-not $NoHello)".ToLower()
-$tfm = if ($NoHello) { "net8.0-windows" } else { "net8.0-windows10.0.19041.0" }
-$publishDir = Join-Path $root "src\FolderLock.App\bin\$Configuration\$tfm\publish\win-x64"
+
+# 固定发布目录：安装器（FolderLock.iss）与 install-service.ps1 都读取此目录，
+# 避免因 TFM 变化（net8.0-windows 与 net8.0-windows10.0.19041.0）导致路径不一致。
+$publishDir = Join-Path $root "artifacts\publish\win-x64"
 
 New-Item -ItemType Directory -Force -Path $publishDir | Out-Null
 
@@ -23,17 +32,29 @@ dotnet publish $appProject -c $Configuration -p:PublishProfile=win-x64 $helloFla
 Write-Host "发布守护服务 -> $publishDir" -ForegroundColor Cyan
 dotnet publish $serviceProject -c $Configuration -r win-x64 --self-contained false -o $publishDir
 
-if (-not [string]::IsNullOrWhiteSpace($CertThumbprint)) {
-    Write-Host "对可执行文件进行代码签名..." -ForegroundColor Cyan
-    $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
-    if (-not $signtool) {
-        Write-Warning "未找到 signtool.exe（属于 Windows SDK），跳过签名。"
+if ($Sign) {
+    # 签名失败时 sign.ps1 会以非零码退出（exit 1），因此发布流程会在此中止，
+    # 不会产出“未签名/签名错误”的发布包。
+    Write-Host "代码签名（含 RFC3161 时间戳）..." -ForegroundColor Cyan
+
+    $signArguments = @{
+        PublishDirectory = $publishDir
+        TimestampUrl     = $TimestampUrl
     }
-    else {
-        foreach ($exe in Get-ChildItem $publishDir -Filter *.exe) {
-            & $signtool sign /sha1 $CertThumbprint /fd SHA256 /tr $TimestampUrl /td SHA256 $exe.FullName
-        }
+    if ($Thumbprint) { $signArguments.Thumbprint = $Thumbprint }
+    if ($PfxPath) { $signArguments.PfxPath = $PfxPath }
+    if ($PfxPassword) { $signArguments.PfxPassword = $PfxPassword }
+    if ($ExpectedPublisher) { $signArguments.ExpectedPublisher = $ExpectedPublisher }
+    if ($SigntoolPath) { $signArguments.SigntoolPath = $SigntoolPath }
+    if ($AllowUntrustedChain) { $signArguments.AllowUntrustedChain = $true }
+
+    & (Join-Path $PSScriptRoot "sign.ps1") @signArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "代码签名失败（退出码 $LASTEXITCODE），发布已中止，不产出签名错误的包。"
     }
+}
+else {
+    Write-Warning "未启用代码签名（-Sign）。默认警告模式下未签名的 FolderLock.Service.exe 仍可启动，但只有日志记录、没有签名保护；正式发布请签名并把 FOLDERLOCK_REQUIRE_SIGNATURE 设为 1。"
 }
 
 Write-Host "完成。产物目录：$publishDir" -ForegroundColor Green
