@@ -66,7 +66,7 @@ public sealed class FolderStoreTests : IDisposable
     {
         _store.Insert(new FolderRecord { Path = @"C:\Data\Secrets", DisplayName = "Secrets" });
 
-        Assert.ThrowsAny<Exception>(() =>
+        Assert.Throws<Microsoft.Data.Sqlite.SqliteException>(() =>
             _store.Insert(new FolderRecord { Path = @"C:\Data\Secrets", DisplayName = "Secrets" }));
     }
 

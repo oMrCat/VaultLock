@@ -15,7 +15,10 @@ public sealed class FolderServiceKeyringTests : IDisposable
     {
         _root = Path.Combine(Path.GetTempPath(), "FolderLockTests", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_root);
-        _service = new FolderService(new FolderStore(Path.Combine(_root, "db.sqlite")), new FolderLocker());
+        _service = new FolderService(
+            new FolderStore(Path.Combine(_root, "db.sqlite")),
+            new FolderLocker(),
+            watchlist: new WatchlistStore(Path.Combine(_root, "watchlist.json")));
     }
 
     private FolderRecord MakeFolder(string name)

@@ -22,6 +22,12 @@ public sealed class FolderRecord
 
     public bool AccessRulesProtected { get; set; }
 
+    /// <summary>加锁前目录的 Owner SID，用于解锁失败时给出恢复指引。</summary>
+    public string? OwnerSid { get; set; }
+
+    /// <summary>加锁前目录的原始属性（uint 形式），解锁时只还原 Hidden/System 两位。</summary>
+    public uint? OriginalAttributes { get; set; }
+
     public EncryptionMode EncryptionMode { get; set; } = EncryptionMode.None;
 
     public string? RecoveryHash { get; set; }
@@ -51,6 +57,7 @@ public enum AuditAction
     TraceClean,
     ExportKit,
     ImportKit,
+    WatchlistSync,
 }
 
 public sealed class AuditEntry

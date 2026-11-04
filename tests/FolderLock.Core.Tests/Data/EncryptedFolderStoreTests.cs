@@ -57,7 +57,7 @@ public sealed class EncryptedFolderStoreTests : IDisposable
         store.Insert(new FolderRecord { Path = @"C:\Secret", DisplayName = "Secret" });
 
         var wrong = new FolderStore(_dbPath, new byte[32]);
-        Assert.ThrowsAny<Exception>(() => wrong.Initialize());
+        Assert.Throws<Microsoft.Data.Sqlite.SqliteException>(() => wrong.Initialize());
     }
 
     [Fact]

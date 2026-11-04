@@ -21,7 +21,10 @@ public sealed class FolderServiceEncryptionTests : IDisposable
         File.WriteAllText(Path.Combine(_folder, "nested", "inner.txt"), "inner");
 
         var dbPath = Path.Combine(_root, "folderlock.db");
-        _service = new FolderService(new FolderStore(dbPath), new FolderLocker());
+        _service = new FolderService(
+            new FolderStore(dbPath),
+            new FolderLocker(),
+            watchlist: new WatchlistStore(Path.Combine(_root, "watchlist.json")));
     }
 
     [Fact]
@@ -139,10 +142,90 @@ public sealed class FolderServiceEncryptionTests : IDisposable
         Assert.False(Directory.Exists(_folder));
     }
 
+    [Fact]
+    public void LockEncrypted_WhenSourceCannotBeErased_KeepsVaultAndMarksLocked()
+    {
+        var record = _service.Add(_folder, Password, encrypt: true, out _);
+
+        // 允许加密读取，但禁止擦除（模拟文件被其他程序占用且未共享删除）
+        using var hold = new FileStream(
+            Path.Combine(_folder, "data.txt"),
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read);
+
+        var error = Assert.Throws<FolderLockException>(() => _service.Lock(record.Id, Password));
+        Assert.Contains("无法安全擦除", error.Message);
+
+        var loaded = _service.GetAll().Single();
+        Assert.True(loaded.IsLocked);
+        Assert.NotNull(loaded.VaultPath);
+        Assert.True(File.Exists(loaded.VaultPath));
+
+        // 容器必须是完整可用的，绝不能在失败路径里被删掉
+        using var secret = new Secret(Password);
+        Assert.True(_service.VerifyVault(record.Id, secret));
+    }
+
+    [Fact]
+    public void LockEncrypted_RetryAfterEraseFailure_RefusesAndDoesNotOverwriteVault()
+    {
+        var record = _service.Add(_folder, Password, encrypt: true, out _);
+
+        long vaultLength;
+        using (var hold = new FileStream(
+                   Path.Combine(_folder, "data.txt"),
+                   FileMode.Open,
+                   FileAccess.Read,
+                   FileShare.Read))
+        {
+            Assert.Throws<FolderLockException>(() => _service.Lock(record.Id, Password));
+            var vaultPath = _service.GetAll().Single().VaultPath!;
+            vaultLength = new FileInfo(vaultPath).Length;
+        }
+
+        var loaded = _service.GetAll().Single();
+        Assert.True(loaded.IsLocked);
+
+        Assert.Throws<FolderLockException>(() => _service.Lock(record.Id, Password));
+        Assert.Equal(vaultLength, new FileInfo(loaded.VaultPath!).Length);
+
+        using var secret = new Secret(Password);
+        Assert.True(_service.VerifyVault(record.Id, secret));
+    }
+
     public void Dispose()
     {
+        // 测试收尾必须先恢复 ACL，否则残留的 Deny Everyone 会让后续清理/其他测试失败。
+        foreach (var record in _service.GetAll())
+        {
+            if (!record.IsLocked || record.EncryptionMode == EncryptionMode.Aes256Gcm || record.DaclSddl is null)
+            {
+                continue;
+            }
+
+            try
+            {
+                new FolderLocker().Unlock(
+                    record.Path,
+                    new SecurityBackup(
+                        record.DaclSddl,
+                        record.AccessRulesProtected,
+                        record.OwnerSid,
+                        record.OriginalAttributes));
+            }
+            catch
+            {
+            }
+        }
+
         try
         {
+            if (Directory.Exists(_root))
+            {
+                File.SetAttributes(_root, FileAttributes.Normal);
+            }
+
             Directory.Delete(_root, recursive: true);
         }
         catch

@@ -8,7 +8,7 @@ public sealed class FolderStore
         """
         Id, Path, DisplayName, PasswordHash, IsLocked, DaclSddl,
         AccessRulesProtected, EncryptionMode, RecoveryHash, CreatedAt, LastLockedAt,
-        ProtectedRecoveryCode, VaultPath, FailedAttempts, LockoutUntil
+        ProtectedRecoveryCode, VaultPath, FailedAttempts, LockoutUntil, OwnerSid, OriginalAttributes
         """;
 
     private readonly string _connectionString;
@@ -62,11 +62,17 @@ public sealed class FolderStore
 
         using var connection = OpenConnection();
         CreateSchema(connection);
+        EnsureColumns(connection);
+    }
 
+    private static void EnsureColumns(SqliteConnection connection)
+    {
         EnsureColumn(connection, "ProtectedRecoveryCode", "TEXT NULL");
         EnsureColumn(connection, "VaultPath", "TEXT NULL");
         EnsureColumn(connection, "FailedAttempts", "INTEGER NOT NULL DEFAULT 0");
         EnsureColumn(connection, "LockoutUntil", "TEXT NULL");
+        EnsureColumn(connection, "OwnerSid", "TEXT NULL");
+        EnsureColumn(connection, "OriginalAttributes", "INTEGER NULL");
     }
 
     private static void CreateSchema(SqliteConnection connection)
@@ -89,7 +95,9 @@ public sealed class FolderStore
                     ProtectedRecoveryCode TEXT NULL,
                     VaultPath TEXT NULL,
                     FailedAttempts INTEGER NOT NULL DEFAULT 0,
-                    LockoutUntil TEXT NULL
+                    LockoutUntil TEXT NULL,
+                    OwnerSid TEXT NULL,
+                    OriginalAttributes INTEGER NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS AuditLog (
@@ -214,11 +222,11 @@ public sealed class FolderStore
             INSERT INTO Folders
                 (Path, DisplayName, PasswordHash, IsLocked, DaclSddl,
                  AccessRulesProtected, EncryptionMode, RecoveryHash, CreatedAt, LastLockedAt,
-                 ProtectedRecoveryCode, VaultPath, FailedAttempts, LockoutUntil)
+                 ProtectedRecoveryCode, VaultPath, FailedAttempts, LockoutUntil, OwnerSid, OriginalAttributes)
             VALUES
                 ($path, $displayName, $passwordHash, $isLocked, $daclSddl,
                  $accessRulesProtected, $encryptionMode, $recoveryHash, $createdAt, $lastLockedAt,
-                 $protectedRecoveryCode, $vaultPath, $failedAttempts, $lockoutUntil);
+                 $protectedRecoveryCode, $vaultPath, $failedAttempts, $lockoutUntil, $ownerSid, $originalAttributes);
             SELECT last_insert_rowid();
             """;
         AddRecordParameters(command, record);
@@ -249,7 +257,9 @@ public sealed class FolderStore
                 ProtectedRecoveryCode = $protectedRecoveryCode,
                 VaultPath = $vaultPath,
                 FailedAttempts = $failedAttempts,
-                LockoutUntil = $lockoutUntil
+                LockoutUntil = $lockoutUntil,
+                OwnerSid = $ownerSid,
+                OriginalAttributes = $originalAttributes
             WHERE Id = $id;
             """;
         AddRecordParameters(command, record);
@@ -319,32 +329,92 @@ public sealed class FolderStore
         var plainPath = _databasePath + ".plain";
         File.Move(_databasePath, plainPath, overwrite: true);
 
+        var tables = new[] { "Folders", "AuditLog" };
         try
         {
-            using var source = new SqliteConnection(
-                new SqliteConnectionStringBuilder { DataSource = plainPath, Pooling = false }.ToString());
-            source.Open();
-
-            using var target = OpenConnection();
-            CreateSchema(target);
-
-            foreach (var table in new[] { "Folders", "AuditLog" })
+            using (var source = new SqliteConnection(
+                       new SqliteConnectionStringBuilder { DataSource = plainPath, Pooling = false }.ToString()))
             {
-                if (TableExists(source, table))
+                source.Open();
+
+                using (var target = OpenConnection())
                 {
-                    CopyTable(source, target, table);
+                    CreateSchema(target);
+                    EnsureColumns(target);
+
+                    using (var transaction = target.BeginTransaction())
+                    {
+                        foreach (var table in tables)
+                        {
+                            if (TableExists(source, table))
+                            {
+                                CopyTable(source, target, table, transaction);
+                            }
+                        }
+
+                        transaction.Commit();
+                    }
+
+                    // 只有逐表行数完全一致才删除原始明文库，否则回滚到明文库。
+                    VerifyCopy(source, target, tables);
                 }
             }
+
+            File.Delete(plainPath);
         }
-        finally
+        catch
         {
+            TryDeleteFile(_databasePath);
+
             try
             {
-                File.Delete(plainPath);
+                File.Move(plainPath, _databasePath, overwrite: true);
             }
             catch
             {
             }
+
+            throw;
+        }
+    }
+
+    private static void VerifyCopy(SqliteConnection source, SqliteConnection target, IEnumerable<string> tables)
+    {
+        foreach (var table in tables)
+        {
+            if (!TableExists(source, table))
+            {
+                continue;
+            }
+
+            var expected = CountRows(source, table);
+            var actual = TableExists(target, table) ? CountRows(target, table) : 0;
+            if (expected != actual)
+            {
+                throw new InvalidOperationException(
+                    $"明文库迁移校验失败：表 {table} 期望 {expected} 行，实际 {actual} 行。已保留原始明文库。");
+            }
+        }
+    }
+
+    private static long CountRows(SqliteConnection connection, string table)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT COUNT(*) FROM {table};";
+        return Convert.ToInt64(command.ExecuteScalar() ?? 0L);
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch
+        {
         }
     }
 
@@ -356,7 +426,11 @@ public sealed class FolderStore
         return Convert.ToInt64(command.ExecuteScalar() ?? 0L) > 0;
     }
 
-    private static void CopyTable(SqliteConnection source, SqliteConnection target, string table)
+    private static void CopyTable(
+        SqliteConnection source,
+        SqliteConnection target,
+        string table,
+        SqliteTransaction transaction)
     {
         using var read = source.CreateCommand();
         read.CommandText = $"SELECT * FROM {table};";
@@ -369,6 +443,7 @@ public sealed class FolderStore
         while (reader.Read())
         {
             using var insert = target.CreateCommand();
+            insert.Transaction = transaction;
             insert.CommandText = $"INSERT INTO {table} ({columnList}) VALUES ({parameterList});";
             for (var i = 0; i < columns.Count; i++)
             {
@@ -421,6 +496,10 @@ public sealed class FolderStore
         command.Parameters.AddWithValue(
             "$lockoutUntil",
             record.LockoutUntil is { } lockout ? lockout.UtcDateTime.ToString("O") : DBNull.Value);
+        command.Parameters.AddWithValue("$ownerSid", (object?)record.OwnerSid ?? DBNull.Value);
+        command.Parameters.AddWithValue(
+            "$originalAttributes",
+            record.OriginalAttributes is { } attributes ? (long)attributes : DBNull.Value);
     }
 
     private static FolderRecord ReadRecord(SqliteDataReader reader)
@@ -446,6 +525,8 @@ public sealed class FolderStore
             LockoutUntil = reader.IsDBNull(14)
                 ? null
                 : DateTimeOffset.Parse(reader.GetString(14), null, System.Globalization.DateTimeStyles.RoundtripKind),
+            OwnerSid = reader.IsDBNull(15) ? null : reader.GetString(15),
+            OriginalAttributes = reader.IsDBNull(16) ? null : (uint)reader.GetInt64(16),
         };
     }
 }

@@ -236,6 +236,53 @@ public sealed class VaultEncryptorTests : IDisposable
         AssertTreesEqual(_source, _restored);
     }
 
+    [Fact]
+    public void TruncatedVault_IsRejectedAndTryVerifyReturnsFalse()
+    {
+        _encryptor.EncryptDirectory(_source, _vault, Password, _recoveryCode, Iterations);
+
+        var bytes = File.ReadAllBytes(_vault);
+        File.WriteAllBytes(_vault, bytes.Take(bytes.Length - 48).ToArray()); // 去掉结束块
+
+        Assert.False(_encryptor.TryVerify(_vault, Password.AsSpan()));
+        Assert.Throws<VaultException>(() => _encryptor.DecryptToDirectory(_vault, _restored, Password));
+    }
+
+    [Fact]
+    public void TamperedHeaderFlags_IsRejected()
+    {
+        _encryptor.EncryptDirectory(_source, _vault, Password, _recoveryCode, Iterations);
+        var bytes = File.ReadAllBytes(_vault);
+        bytes[7] ^= 0x02;
+        File.WriteAllBytes(_vault, bytes);
+
+        var error = Assert.Throws<VaultException>(() => _encryptor.Verify(_vault, Password));
+        Assert.Contains("头部", error.Message);
+    }
+
+    [Fact]
+    public void TryVerify_ShortFileWithValidMagicReturnsFalse()
+    {
+        _encryptor.EncryptDirectory(_source, _vault, Password, _recoveryCode, Iterations);
+        var bytes = File.ReadAllBytes(_vault);
+        File.WriteAllBytes(_vault, bytes.Take(100).ToArray());
+
+        Assert.False(_encryptor.TryVerify(_vault, Password.AsSpan()));
+    }
+
+    [Fact]
+    public void Encrypt_RefusesToOverwriteExistingVault()
+    {
+        _encryptor.EncryptDirectory(_source, _vault, Password, _recoveryCode, Iterations);
+        var length = new FileInfo(_vault).Length;
+
+        Assert.Throws<VaultException>(() =>
+            _encryptor.EncryptDirectory(_source, _vault, Password, _recoveryCode, Iterations));
+
+        Assert.Equal(length, new FileInfo(_vault).Length);
+        Assert.True(_encryptor.TryVerify(_vault, Password.AsSpan()));
+    }
+
     private sealed class ProgressCollector : IProgress<VaultProgress>
     {
         public List<VaultProgress> Values { get; } = new();

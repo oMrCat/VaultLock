@@ -67,7 +67,12 @@ public class PasswordHasherTests
     [InlineData("PBKDF2-SHA256$1000$not-base64$aGFzaA==")]
     public void Decode_ThrowsOnMalformedInput(string encoded)
     {
-        Assert.ThrowsAny<Exception>(() => PasswordHash.Decode(encoded));
+        var exception = Record.Exception(() => PasswordHash.Decode(encoded));
+
+        Assert.NotNull(exception);
+        Assert.True(
+            exception is FormatException or ArgumentException,
+            $"期望 FormatException 或 ArgumentException，实际为 {exception.GetType().Name}。");
     }
 
     [Fact]

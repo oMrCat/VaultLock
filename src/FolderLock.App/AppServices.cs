@@ -13,6 +13,7 @@ public static class AppServices
     private static FolderService Create()
     {
         var service = new FolderService(new FolderStore(key: DatabaseKeyStore.GetOrCreate()), new FolderLocker());
+        service.CleanExplorerCaches = AppSettings.Current.CleanExplorerCaches;
         try
         {
             service.SyncLockStates();
