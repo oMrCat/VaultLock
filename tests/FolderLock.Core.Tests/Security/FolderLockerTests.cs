@@ -6,9 +6,17 @@ namespace FolderLock.Core.Tests.Security;
 
 public sealed class FolderLockerTests : IDisposable
 {
+    private static readonly SecurityIdentifier Everyone = new(WellKnownSidType.WorldSid, null);
+
+    /// <summary>与 FolderLocker.ApplyLock 中 Deny Everyone 的权限位保持一致（去掉 WRITE_DAC）。</summary>
+    private static readonly FileSystemRights LockDenyRights =
+        FileSystemRights.FullControl & ~FileSystemRights.ChangePermissions;
+
     private readonly string _root;
     private readonly string _folder;
     private readonly string _file;
+    private readonly string _nestedFolder;
+    private readonly string _nestedFile;
     private readonly FolderLocker _locker = new();
     private SecurityBackup? _backup;
 
@@ -19,6 +27,11 @@ public sealed class FolderLockerTests : IDisposable
         Directory.CreateDirectory(_folder);
         _file = Path.Combine(_folder, "note.txt");
         File.WriteAllText(_file, "top secret");
+
+        _nestedFolder = Path.Combine(_folder, "nested");
+        Directory.CreateDirectory(_nestedFolder);
+        _nestedFile = Path.Combine(_nestedFolder, "deep.txt");
+        File.WriteAllText(_nestedFile, "deep secret");
     }
 
     [Fact]
@@ -38,6 +51,43 @@ public sealed class FolderLockerTests : IDisposable
         _backup = _locker.Lock(_folder);
 
         Assert.Throws<UnauthorizedAccessException>(() => File.ReadAllText(_file));
+    }
+
+    [Fact]
+    public void Lock_BlocksReadingNestedContainedFiles()
+    {
+        _backup = _locker.Lock(_folder);
+
+        // 锁规则带 OI|CI 标志，必须能穿透一层子目录作用到更深层的文件。
+        Assert.Throws<UnauthorizedAccessException>(() => File.ReadAllText(_nestedFile));
+    }
+
+    [Fact]
+    public void Lock_CutsInheritanceAndInstallsOnlyTwoLockRules()
+    {
+        _backup = _locker.Lock(_folder);
+
+        var security = new DirectoryInfo(_folder).GetAccessControl(AccessControlSections.Access);
+
+        // 切断继承，避免原始 Allow 规则先于 Deny 生效。
+        Assert.True(security.AreAccessRulesProtected);
+
+        var rules = GetExplicitRules(security);
+        Assert.Equal(2, rules.Count);
+
+        // Synchronize 位不会被 Windows 持久化到 ACE 中，比较时忽略。
+        var expectedDeny = LockDenyRights & ~FileSystemRights.Synchronize;
+
+        var deny = Assert.Single(rules, rule => rule.AccessControlType == AccessControlType.Deny);
+        Assert.Equal(Everyone.Value, ((SecurityIdentifier)deny.IdentityReference).Value);
+        Assert.Equal(expectedDeny, deny.FileSystemRights);
+        Assert.Equal(InheritanceFlags.ObjectInherit | InheritanceFlags.ContainerInherit, deny.InheritanceFlags);
+
+        // 保留 WRITE_DAC，Unlock 才能在同进程内还原原始 DACL。
+        var allow = Assert.Single(rules, rule => rule.AccessControlType == AccessControlType.Allow);
+        Assert.Equal(Everyone.Value, ((SecurityIdentifier)allow.IdentityReference).Value);
+        Assert.Equal(FileSystemRights.ChangePermissions, allow.FileSystemRights & ~FileSystemRights.Synchronize);
+        Assert.Equal(InheritanceFlags.ObjectInherit | InheritanceFlags.ContainerInherit, allow.InheritanceFlags);
     }
 
     [Fact]
@@ -73,6 +123,41 @@ public sealed class FolderLockerTests : IDisposable
         Assert.Equal(originalRules, DescribeExplicitRules(restored));
         Assert.Equal(originalProtected, restored.AreAccessRulesProtected);
         Assert.False(_locker.IsLocked(_folder));
+    }
+
+    [Fact]
+    public void Unlock_RestoresAccessToNestedFilesAndFolders()
+    {
+        _backup = _locker.Lock(_folder);
+        _locker.Unlock(_folder, _backup);
+        _backup = null;
+
+        Assert.Equal("deep secret", File.ReadAllText(_nestedFile));
+        Assert.Single(Directory.GetFiles(_nestedFolder));
+    }
+
+    [Fact]
+    public void Unlock_LeavesNoResidualLockRulesOnNestedItems()
+    {
+        _backup = _locker.Lock(_folder);
+        _locker.Unlock(_folder, _backup);
+        _backup = null;
+
+        // 关键回归点：切断继承时若锁规则没有 OI|CI 标志，子项的锁规则会被固化成显式 ACE，
+        // 之后即使还原了目录 DACL，子文件仍然不可读。这里断言子项只剩继承规则。
+        var childFile = new FileInfo(_nestedFile).GetAccessControl(AccessControlSections.Access);
+        var childFolder = new DirectoryInfo(_nestedFolder).GetAccessControl(AccessControlSections.Access);
+
+        Assert.Empty(GetExplicitRules(childFile));
+        Assert.Empty(GetExplicitRules(childFolder));
+    }
+
+    private static List<FileSystemAccessRule> GetExplicitRules(FileSystemSecurity security)
+    {
+        return security
+            .GetAccessRules(includeExplicit: true, includeInherited: false, targetType: typeof(SecurityIdentifier))
+            .Cast<FileSystemAccessRule>()
+            .ToList();
     }
 
     private static List<string> DescribeExplicitRules(DirectorySecurity security)

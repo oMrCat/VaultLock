@@ -11,6 +11,7 @@ internal static class NativeDirectoryAccess
     private const uint OpenExisting = 3;
     private const uint BackupSemantics = 0x02000000;
 
+    /// <summary>检查当前进程对目录是否有 WRITE_DAC 权限（决定能否加/解锁）。</summary>
     public static bool CanChangePermissions(string path)
     {
         var handle = CreateFileW(

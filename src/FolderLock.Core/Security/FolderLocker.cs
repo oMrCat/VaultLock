@@ -52,6 +52,10 @@ public sealed class FolderLocker : IFolderLocker
     private static readonly SecurityIdentifier WorldSid = new(WellKnownSidType.WorldSid, null);
     private static readonly FileAttributes LockMarkerAttributes = FileAttributes.Hidden | FileAttributes.System;
 
+    /// <summary>Deny Everyone 除 WRITE_DAC 外所有权限 + Allow Everyone WRITE_DAC。</summary>
+    private static readonly FileSystemRights DenyRights =
+        FileSystemRights.FullControl & ~FileSystemRights.ChangePermissions;
+
     public SecurityBackup CaptureBackup(string path)
     {
         var directory = GetDirectory(path);
@@ -84,22 +88,32 @@ public sealed class FolderLocker : IFolderLocker
                 "请改用目录所有者账户运行，或以管理员取得所有权后重试。");
         }
 
+        // 加锁 DACL 策略：切断继承 + 清空显式规则 + 加两条带 OI|CI 继承标志的锁标记规则。
+        // Windows DACL 评估顺序：显式 Deny → 显式 Allow → 继承 Deny → 继承 Allow。
+        // - Deny Everyone FullControl 减去 ChangePermissions：挡掉 Everyone 成员的所有常规访问
+        // - Allow Everyone ChangePermissions：保留 WRITE_DAC 让同进程能在 Unlock 时还原原 DACL
+        // 锁规则带 OI|CI 标志 → 自然继承到子文件/子目录（作为继承规则，不固化为显式规则）。
+        // Unlock 时 SetAccessControl 还原目录 DACL → 继承链自动恢复，子文件锁规则随之消失。
         var security = directory.GetAccessControl(AccessControlSections.Access);
-
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
 
-        foreach (FileSystemAccessRule rule in security.GetAccessRules(
+        // 移除可能存在的旧显式规则
+        foreach (var rule in security.GetAccessRules(
                      includeExplicit: true,
                      includeInherited: false,
-                     targetType: typeof(SecurityIdentifier)))
+                     targetType: typeof(SecurityIdentifier))
+                 .Cast<FileSystemAccessRule>())
         {
             security.RemoveAccessRuleSpecific(rule);
         }
 
+        const InheritanceFlags inheritAll = InheritanceFlags.ObjectInherit | InheritanceFlags.ContainerInherit;
+        const PropagationFlags noProp = PropagationFlags.None;
+
         security.AddAccessRule(new FileSystemAccessRule(
-            WorldSid,
-            FileSystemRights.FullControl,
-            AccessControlType.Deny));
+            WorldSid, DenyRights, inheritAll, noProp, AccessControlType.Deny));
+        security.AddAccessRule(new FileSystemAccessRule(
+            WorldSid, FileSystemRights.ChangePermissions, inheritAll, noProp, AccessControlType.Allow));
 
         directory.Attributes |= LockMarkerAttributes;
         directory.SetAccessControl(security);
@@ -117,13 +131,13 @@ public sealed class FolderLocker : IFolderLocker
         ArgumentNullException.ThrowIfNull(backup);
 
         var directory = GetDirectory(path);
+
+        // 直接用原始 SDDL 替换整个 DACL——锁留下的显式 Deny/Allow 规则会被整块覆盖。
+        // ApplyLock 下发的锁规则带 OI|CI，只以继承规则形式作用到子项，没有固化成显式 ACE；
+        // 因此这里还原目录 DACL 后继承链自动恢复，子文件/子目录无需递归清理。
+        // 目录上残留的 Allow Everyone ChangePermissions 保证了此时 WRITE_DAC 仍可用。
         var security = new DirectorySecurity();
         security.SetSecurityDescriptorSddlForm(backup.DaclSddl, AccessControlSections.Access);
-
-        if (!backup.AccessRulesProtected)
-        {
-            security.SetAccessRuleProtection(isProtected: false, preserveInheritance: false);
-        }
 
         try
         {
@@ -150,7 +164,7 @@ public sealed class FolderLocker : IFolderLocker
         }
         catch (UnauthorizedAccessException)
         {
-            // 拒绝访问通常意味着 Deny Everyone 已生效：视为已锁定。
+            // 显式拒绝规则已生效：视为锁定
             return FolderLockState.Locked;
         }
         catch (IOException)
@@ -162,21 +176,16 @@ public sealed class FolderLocker : IFolderLocker
             return FolderLockState.Unknown;
         }
 
-        foreach (FileSystemAccessRule rule in security.GetAccessRules(
-                     includeExplicit: true,
-                     includeInherited: false,
-                     targetType: typeof(SecurityIdentifier)))
-        {
-            if (rule.AccessControlType == AccessControlType.Deny &&
-                rule.FileSystemRights == FileSystemRights.FullControl &&
+        return security.GetAccessRules(includeExplicit: true, includeInherited: false, targetType: typeof(SecurityIdentifier))
+            .Cast<FileSystemAccessRule>()
+            .Any(rule =>
+                rule.AccessControlType == AccessControlType.Deny &&
                 rule.IdentityReference is SecurityIdentifier sid &&
-                sid.Equals(WorldSid))
-            {
-                return FolderLockState.Locked;
-            }
-        }
-
-        return FolderLockState.Unlocked;
+                sid.Equals(WorldSid) &&
+                (rule.FileSystemRights & FileSystemRights.ChangePermissions) == 0 &&
+                (rule.FileSystemRights & FileSystemRights.ReadData) != 0)
+            ? FolderLockState.Locked
+            : FolderLockState.Unlocked;
     }
 
     public bool IsLocked(string path) => GetLockState(path) == FolderLockState.Locked;
