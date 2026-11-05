@@ -12,7 +12,9 @@ public partial class PasswordDialog : FluentWindow
         string title,
         string message,
         bool requireConfirmation = false,
-        bool showEncryptionOption = false)
+        bool showEncryptionOption = false,
+        bool showForgotPassword = false,
+        string? hint = null)
     {
         InitializeComponent();
         Title = title;
@@ -21,8 +23,18 @@ public partial class PasswordDialog : FluentWindow
         _requireConfirmation = requireConfirmation;
         ConfirmPanel.Visibility = requireConfirmation ? Visibility.Visible : Visibility.Collapsed;
         EncryptionCheck.Visibility = showEncryptionOption ? Visibility.Visible : Visibility.Collapsed;
+        ForgotPasswordButton.Visibility = showForgotPassword ? Visibility.Visible : Visibility.Collapsed;
+        if (!string.IsNullOrWhiteSpace(hint))
+        {
+            HintText.Text = L.T("Hint.Visible") + hint;
+            HintText.Visibility = Visibility.Visible;
+        }
+
         Loaded += (_, _) => PasswordInput.Focus();
     }
+
+    /// <summary>用户点击“忘记密码？”时为 true；调用方应转入恢复向导。</summary>
+    public bool ForgotPasswordRequested { get; private set; }
 
     public string Password => PasswordInput.Password;
 
@@ -68,6 +80,12 @@ public partial class PasswordDialog : FluentWindow
             return;
         }
 
+        DialogResult = true;
+    }
+
+    private void ForgotPassword_Click(object sender, RoutedEventArgs e)
+    {
+        ForgotPasswordRequested = true;
         DialogResult = true;
     }
 

@@ -18,6 +18,11 @@ public sealed class SingleInstance : IDisposable
         "add",
         "lock",
         "unlock",
+        "remove",
+        "open",
+        "verify",
+        "decrypt",
+        "salvage",
     };
 
     private readonly Mutex _mutex;

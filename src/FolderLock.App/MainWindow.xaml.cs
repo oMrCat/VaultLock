@@ -295,6 +295,23 @@ public partial class MainWindow : FluentWindow
         UpdateDetail();
     }
 
+    private bool NeedsRecoveryBackupReminder(FolderItem item)
+    {
+        if (!item.IsEncrypted)
+        {
+            return false;
+        }
+
+        try
+        {
+            return AppServices.Folders.NeedsRecoveryBackupReminder(item.Id);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private void UpdateStatus(string? message = null)
     {
         var locked = _items.Count(item => item.IsLocked);
@@ -304,6 +321,12 @@ public partial class MainWindow : FluentWindow
         if (AppServices.Folders.LastWatchlistError is { Length: > 0 } watchlistError)
         {
             text = $"{text}（监控列表写入失败：{watchlistError}）";
+        }
+
+        var reminderCount = _items.Count(NeedsRecoveryBackupReminder);
+        if (reminderCount > 0)
+        {
+            text = $"{text}（{L.Format("Status.BackupReminder", reminderCount)}）";
         }
 
         StatusText.Text = text;
@@ -461,7 +484,7 @@ public partial class MainWindow : FluentWindow
 
             if (recoveryCode is not null)
             {
-                ShowRecoveryCode(recoveryCode);
+                ShowRecoveryCode(recoveryCode, record.Id);
             }
 
             Reload(record.Id);
@@ -473,9 +496,52 @@ public partial class MainWindow : FluentWindow
         }
     }
 
-    private void ShowRecoveryCode(string code)
+    private void ShowRecoveryCode(string code, long? folderId = null)
     {
-        new RecoveryCodeDialog(code) { Owner = this }.ShowDialog();
+        new RecoveryCodeDialog(
+                code,
+                folderId is null
+                    ? null
+                    : () => AppServices.Folders.MarkRecoveryCodeBackedUp(folderId.Value))
+            { Owner = this }
+            .ShowDialog();
+    }
+
+    private void OpenRecoveryWizard(long folderId, string displayName)
+    {
+        var wizard = new RecoveryWizardWindow(folderId, displayName) { Owner = this };
+        var recovered = wizard.ShowDialog() == true;
+        Reload(folderId);
+        if (recovered)
+        {
+            UpdateStatus("恢复成功，已设置新密码。");
+        }
+    }
+
+    private void PasswordHint_Click(object sender, RoutedEventArgs e)
+    {
+        var item = Selected;
+        if (item is null)
+        {
+            ShowInfo("请先选择一个文件夹。");
+            return;
+        }
+
+        if (!item.IsEncrypted)
+        {
+            ShowInfo("该文件夹未使用加密，没有容器密码提示。");
+            return;
+        }
+
+        var dialog = new PasswordHintDialog(item.Id, item.DisplayName, AppServices.Folders.GetPasswordHint(item.Id))
+        {
+            Owner = this,
+        };
+
+        if (dialog.ShowDialog() == true)
+        {
+            UpdateStatus("密码提示已更新。");
+        }
     }
 
     private async void Lock_Click(object sender, RoutedEventArgs e)
@@ -606,9 +672,21 @@ public partial class MainWindow : FluentWindow
         var prompt = item.IsEncrypted
             ? $"输入“{item.DisplayName}”的密码或恢复码以解锁："
             : $"输入“{item.DisplayName}”的密码以解锁：";
-        var dialog = new PasswordDialog(L.T("Dialog.Unlock"), prompt) { Owner = this };
+        var hint = item.IsEncrypted ? AppServices.Folders.GetPasswordHint(item.Id) : null;
+        var dialog = new PasswordDialog(
+                L.T("Dialog.Unlock"),
+                prompt,
+                showForgotPassword: item.IsEncrypted,
+                hint: hint)
+            { Owner = this };
         if (dialog.ShowDialog() != true)
         {
+            return false;
+        }
+
+        if (dialog.ForgotPasswordRequested)
+        {
+            OpenRecoveryWizard(item.Id, item.DisplayName);
             return false;
         }
 
@@ -745,14 +823,37 @@ public partial class MainWindow : FluentWindow
 
         try
         {
-            var code = AppServices.Folders.GetRecoveryCode(item.Id);
+            string? code;
+            if (AppServices.Folders.CanRevealRecoveryCodeWithoutPassword(item.Id))
+            {
+                code = AppServices.Folders.RevealRecoveryCode(item.Id);
+            }
+            else
+            {
+                var dialog = new PasswordDialog(
+                    L.T("Dialog.ViewRecovery"),
+                    "恢复码查看窗口已过期，请输入主密码：",
+                    hint: AppServices.Folders.GetPasswordHint(item.Id))
+                {
+                    Owner = this,
+                };
+
+                if (dialog.ShowDialog() != true)
+                {
+                    return;
+                }
+
+                using var secret = dialog.GetSecret();
+                code = AppServices.Folders.RevealRecoveryCode(item.Id, secret);
+            }
+
             if (code is null)
             {
                 ShowInfo("无法读取恢复码（可能由其他 Windows 账户创建）。");
                 return;
             }
 
-            ShowRecoveryCode(code);
+            ShowRecoveryCode(code, item.Id);
         }
         catch (Exception ex)
         {
@@ -944,32 +1045,39 @@ public partial class MainWindow : FluentWindow
 
     public void HandleStartupArgs(string[] args)
     {
-        var (verb, path) = ParseCommand(args);
-        if (verb is not null && path is not null)
+        foreach (var (verb, path) in ParseCommands(args))
         {
             HandleExternalCommand(verb, path);
         }
     }
 
-    public static (string? Verb, string? Path) ParseCommand(string[] args)
+    /// <summary>
+    /// 解析 shell 菜单传入的命令。多选时 Explorer 会把多个路径放在同一动词之后，
+    /// 这里统一展开成“一个路径一条命令”，逐个处理。
+    /// </summary>
+    public static IReadOnlyList<(string Verb, string Path)> ParseCommands(string[] args)
     {
         if (args.Length == 0)
         {
-            return (null, null);
-        }
-
-        if (args.Length == 1)
-        {
-            return ("add", args[0]);
+            return Array.Empty<(string, string)>();
         }
 
         var first = args[0];
-        if (first.StartsWith("--", StringComparison.Ordinal))
+        if (!first.StartsWith("--", StringComparison.Ordinal))
         {
-            return (first[2..].ToLowerInvariant(), args[1]);
+            // 无动词时沿用旧行为：所有参数都当作“添加到列表”。
+            return args
+                .Where(arg => arg is not "--tray")
+                .Select(arg => ("add", arg))
+                .ToList();
         }
 
-        return ("add", first);
+        var verb = first[2..].ToLowerInvariant();
+        return args
+            .Skip(1)
+            .Where(arg => arg is not "--tray")
+            .Select(arg => (verb, arg))
+            .ToList();
     }
 
     public void HandleExternalCommand(string verb, string path)
@@ -995,6 +1103,24 @@ public partial class MainWindow : FluentWindow
                     break;
                 case "unlock":
                     ExternalUnlock(path);
+                    break;
+                case "remove":
+                    ExternalRemove(path);
+                    break;
+                case "open":
+                    ExternalOpen(path);
+                    break;
+                case "verify":
+                    ExternalVerifyVault(path);
+                    break;
+                case "decrypt":
+                    ExternalDecryptVault(path);
+                    break;
+                case "salvage":
+                    ExternalSalvageVault(path);
+                    break;
+                default:
+                    ShowInfo($"无法识别的命令：{verb}");
                     break;
             }
         }
@@ -1041,7 +1167,7 @@ public partial class MainWindow : FluentWindow
 
         if (recoveryCode is not null)
         {
-            ShowRecoveryCode(recoveryCode);
+            ShowRecoveryCode(recoveryCode, record.Id);
         }
 
         Reload(record.Id);
@@ -1082,7 +1208,7 @@ public partial class MainWindow : FluentWindow
 
             if (recoveryCode is not null)
             {
-                ShowRecoveryCode(recoveryCode);
+                ShowRecoveryCode(recoveryCode, record.Id);
             }
 
             AppServices.Folders.Lock(record.Id, createdSecret);
@@ -1130,9 +1256,20 @@ public partial class MainWindow : FluentWindow
             return;
         }
 
-        var dialog = new PasswordDialog(L.T("Dialog.Unlock"), $"输入“{record.DisplayName}”的密码以解锁：") { Owner = this };
+        var dialog = new PasswordDialog(
+                L.T("Dialog.Unlock"),
+                $"输入“{record.DisplayName}”的密码以解锁：",
+                showForgotPassword: record.EncryptionMode != FolderLock.Core.Data.EncryptionMode.None,
+                hint: AppServices.Folders.GetPasswordHint(record.Id))
+            { Owner = this };
         if (dialog.ShowDialog() != true)
         {
+            return;
+        }
+
+        if (dialog.ForgotPasswordRequested)
+        {
+            OpenRecoveryWizard(record.Id, record.DisplayName);
             return;
         }
 
@@ -1144,6 +1281,185 @@ public partial class MainWindow : FluentWindow
 
         Reload(record.Id);
         UpdateStatus("已解锁。");
+    }
+
+    private void ExternalRemove(string path)
+    {
+        var normalized = NormalizeExisting(path);
+        if (normalized is null)
+        {
+            return;
+        }
+
+        var record = AppServices.Folders.GetByPath(normalized);
+        if (record is null)
+        {
+            ShowInfo("该文件夹不在列表中。");
+            return;
+        }
+
+        var dialog = new PasswordDialog(L.T("Dialog.Remove"), $"输入“{record.DisplayName}”的密码以从列表移除（不会删除文件）：")
+        {
+            Owner = this,
+        };
+
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        using var secret = dialog.GetSecret();
+        AppServices.Folders.Remove(record.Id, secret);
+        Reload();
+        UpdateStatus("已移除。");
+    }
+
+    private void ExternalOpen(string path)
+    {
+        if (Directory.Exists(path))
+        {
+            var normalized = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+            var record = AppServices.Folders.GetByPath(normalized);
+            if (record is null)
+            {
+                ShowInfo("该文件夹不在保护列表中，可先使用“加入保护列表”。");
+                return;
+            }
+
+            Reload(record.Id);
+            ShowInfo(record.IsLocked ? "已在列表选中该文件夹，请先在主界面解锁。" : "已在列表选中该文件夹。");
+            return;
+        }
+
+        if (File.Exists(path))
+        {
+            var full = Path.GetFullPath(path);
+            var record = AppServices.Folders
+                .GetAll()
+                .FirstOrDefault(item =>
+                    item.VaultPath is not null &&
+                    string.Equals(Path.GetFullPath(item.VaultPath), full, StringComparison.OrdinalIgnoreCase));
+
+            if (record is null)
+            {
+                ShowInfo("该容器文件不在保护列表中。");
+                return;
+            }
+
+            Reload(record.Id);
+            ShowInfo("已在列表选中该容器对应的文件夹。");
+            return;
+        }
+
+        ShowInfo($"路径不存在：{path}");
+    }
+
+    private void ExternalVerifyVault(string path)
+    {
+        var vault = NormalizeVaultFile(path);
+        if (vault is null)
+        {
+            return;
+        }
+
+        var dialog = new PasswordDialog(L.T("Dialog.Verify"), "输入该容器的密码或恢复码：") { Owner = this };
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        using var secret = dialog.GetSecret();
+        var info = AppServices.Folders.InspectVaultFile(vault);
+        if (!AppServices.Folders.VerifyVaultFile(vault, secret))
+        {
+            ShowInfo("容器校验失败：密码或恢复码不正确，或文件已损坏。");
+            return;
+        }
+
+        ShowInfo(
+            $"容器完好。\n版本：{info.Version}\nKDF 迭代：{info.Iterations}\n含恢复码：{(info.HasRecovery ? "是" : "否")}\n大小：{info.Size / 1024.0 / 1024.0:0.0} MB");
+    }
+
+    private void ExternalDecryptVault(string path)
+    {
+        var vault = NormalizeVaultFile(path);
+        if (vault is null)
+        {
+            return;
+        }
+
+        var dialog = new PasswordDialog(L.T("Dialog.Unlock"), "输入该容器的密码或恢复码：") { Owner = this };
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        var folderDialog = new OpenFolderDialog { Title = "选择解密输出位置" };
+        if (folderDialog.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        using var secret = dialog.GetSecret();
+        var target = BuildOutputFolder(folderDialog.FolderName, Path.GetFileNameWithoutExtension(vault));
+        AppServices.Folders.DecryptVaultFile(vault, target, secret);
+        ShowInfo($"解密完成，内容已还原到：\n{target}");
+    }
+
+    private void ExternalSalvageVault(string path)
+    {
+        var vault = NormalizeVaultFile(path);
+        if (vault is null)
+        {
+            return;
+        }
+
+        var dialog = new PasswordDialog(L.T("Dialog.Verify"), "输入该容器的密码或恢复码：") { Owner = this };
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        var folderDialog = new OpenFolderDialog { Title = "选择救援输出位置" };
+        if (folderDialog.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        using var secret = dialog.GetSecret();
+        var target = BuildOutputFolder(folderDialog.FolderName, Path.GetFileNameWithoutExtension(vault) + "-救援");
+        var result = AppServices.Folders.SalvageVaultFile(vault, secret, target);
+        ShowInfo(result.Success
+            ? $"救援完成，内容已还原到：\n{target}"
+            : $"救援可能不完整：{result.Error}\n已尝试输出到：\n{target}");
+    }
+
+    private string? NormalizeVaultFile(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return null;
+        }
+
+        var full = Path.GetFullPath(path);
+        if (!File.Exists(full))
+        {
+            ShowInfo($"容器文件不存在：{full}");
+            return null;
+        }
+
+        return full;
+    }
+
+    private static string BuildOutputFolder(string parent, string name)
+    {
+        var target = Path.Combine(parent, name);
+        if (!Directory.Exists(target))
+        {
+            return target;
+        }
+
+        return Path.Combine(parent, $"{name}-{DateTime.Now:yyyyMMdd-HHmmss}");
     }
 
     private string? NormalizeExisting(string path)

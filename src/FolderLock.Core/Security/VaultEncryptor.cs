@@ -36,15 +36,18 @@ public sealed class VaultEncryptionReport
 /// <summary>
 /// 加密容器（.flvault）读写实现。
 ///
-/// 格式 v2：
-///   [6 字节魔数][1 版本][1 flags][4 迭代次数][16 盐 A][16 盐 B][60 包装密钥 A][60 包装密钥 B][32 头部 HMAC]
-///   [数据块 ...]（每块：4 长度 + 12 nonce + N 密文 + 16 认证标签，AAD = 块序号）
+/// 格式 v3（当前写入格式）：
+///   [4096 字节头部区：A/B 双块，每块 2048，含 1..8 个密钥槽，详见 <see cref="VaultHeaderV3"/>]
+///   [数据块 ...]（与 v2 完全相同：4 长度 + 12 nonce + N 密文 + 16 认证标签，AAD = 块序号）
 ///   [结束块：4 长度(= -1) + 12 nonce + 16 密文 + 16 标签，明文为 (块数, 明文总字节数)]
+///
+/// 格式 v2（只读兼容）：
+///   [6 字节魔数][1 版本][1 flags][4 迭代次数][16 盐 A][16 盐 B][60 包装密钥 A][60 包装密钥 B][32 头部 HMAC]
 ///
 /// 加密算法：AES-256-GCM（每个数据块独立随机 96 位 nonce，AAD 绑定块序号）。
 /// 密钥派生：PBKDF2-HMAC-SHA256，每个容器独立随机盐，DEK 由密码/恢复码派生出的 KEK 再以 AES-GCM 包装。
 /// 头部由 DEK 派生的 HMAC-SHA256 认证，防止篡改 flags / KDF 参数；结束块认证并记录块数与字节数，可检测截断。
-/// v1 容器（无头部 HMAC、以 4 字节 0 作为结束标记）仍然可读，写入统一使用 v2。
+/// v1 容器（无头部 HMAC、以 4 字节 0 作为结束标记）仍然可读；v2 容器只读，需显式升级为 v3。
 /// </summary>
 public sealed class VaultEncryptor
 {
@@ -54,7 +57,9 @@ public sealed class VaultEncryptor
 
     private const byte LegacyVersion = 1;
 
-    private const byte CurrentVersion = 2;
+    private const byte VersionV2 = 2;
+
+    private const byte CurrentVersion = 3;
 
     private const int ChunkSize = 64 * 1024;
 
@@ -74,6 +79,8 @@ public sealed class VaultEncryptor
 
     private const int HeaderSizeV2 = BaseHeaderSize + HeaderMacSize;
 
+    private const int HeaderSizeV3 = VaultHeaderV3.HeaderSize;
+
     private const int TrailerMarker = -1;
 
     private const int TrailerPlainSize = 16;
@@ -91,7 +98,9 @@ public sealed class VaultEncryptor
         CancellationToken cancellationToken = default,
         bool compress = false,
         bool overwrite = false,
-        VaultEncryptionReport? report = null)
+        VaultEncryptionReport? report = null,
+        byte[]? machineKey = null,
+        IReadOnlyList<VaultSlotSpec>? extraSlots = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sourceDirectory);
         ArgumentException.ThrowIfNullOrWhiteSpace(vaultPath);
@@ -132,9 +141,49 @@ public sealed class VaultEncryptor
         progress?.Report(new VaultProgress(0, total));
 
         var dek = RandomNumberGenerator.GetBytes(KeySize);
-        var saltPassword = RandomNumberGenerator.GetBytes(SaltSize);
-        var saltRecovery = RandomNumberGenerator.GetBytes(SaltSize);
-        var hasRecovery = !string.IsNullOrWhiteSpace(recoveryCode);
+        var slots = new List<VaultKeySlot>
+        {
+            VaultKeySlot.CreateForSecret(VaultSlotKind.Password, password, dek, iterations),
+        };
+
+        if (!string.IsNullOrWhiteSpace(recoveryCode))
+        {
+            slots.Add(VaultKeySlot.CreateForSecret(
+                VaultSlotKind.RecoveryCode,
+                recoveryCode,
+                dek,
+                iterations));
+        }
+
+        // 开启“本机自动解锁”时，额外写入 kdf=2 槽；机器 KEK 只存 DPAPI 保护的数据库记录。
+        if (machineKey is not null)
+        {
+            slots.Add(VaultKeySlot.CreateForMachineKey(VaultSlotKind.DpapiUser, machineKey, dek));
+        }
+
+        // 重新锁定前已设置的应急密码等附加通道，需要带回到新容器头部。
+        if (extraSlots is not null)
+        {
+            foreach (var spec in extraSlots)
+            {
+                if (spec.Secret is null || spec.Secret.IsEmpty)
+                {
+                    continue;
+                }
+
+                if (spec.Kind is not (VaultSlotKind.EmergencyPassword or VaultSlotKind.RecoveryCode))
+                {
+                    continue;
+                }
+
+                if (slots.Count >= VaultHeaderV3.MaxSlots)
+                {
+                    throw new VaultException($"密钥槽数量已达上限（{VaultHeaderV3.MaxSlots}）。");
+                }
+
+                slots.Add(VaultKeySlot.CreateForSecret(spec.Kind, spec.Secret.Span, dek, iterations));
+            }
+        }
 
         var parent = Path.GetDirectoryName(vaultFull);
         if (!string.IsNullOrEmpty(parent))
@@ -146,38 +195,12 @@ public sealed class VaultEncryptor
 
         try
         {
-            var kekPassword = PasswordHasher.Derive(password, saltPassword, iterations, KeySize);
-            var wrappedPassword = WrapKey(kekPassword, dek);
-            Array.Clear(kekPassword);
-
-            var wrappedRecovery = new byte[WrappedSize];
-            if (hasRecovery)
-            {
-                var kekRecovery = PasswordHasher.Derive(
-                    RecoveryCode.Normalize(recoveryCode!),
-                    saltRecovery,
-                    iterations,
-                    KeySize);
-                wrappedRecovery = WrapKey(kekRecovery, dek);
-                Array.Clear(kekRecovery);
-            }
-
-            var headerPrefix = BuildHeaderPrefix(
-                CurrentVersion,
-                hasRecovery,
-                compress,
-                iterations,
-                saltPassword,
-                saltRecovery,
-                wrappedPassword,
-                wrappedRecovery);
-            var headerMac = ComputeHeaderMac(dek, headerPrefix);
+            var headerBlock = VaultHeaderV3.BuildBlock(slots, sequence: 1, compress, dek);
 
             using (var output = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
             using (var gcm = new AesGcm(dek, TagSize))
             {
-                output.Write(headerPrefix);
-                output.Write(headerMac);
+                VaultHeaderV3.WriteInitialHeader(output, headerBlock);
 
                 var writer = new ChunkedAeadWriter(output, gcm, cancellationToken);
                 Stream payload = compress
@@ -214,19 +237,21 @@ public sealed class VaultEncryptor
         string targetDirectory,
         ReadOnlySpan<char> secret,
         IProgress<VaultProgress>? progress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        byte[]? machineKey = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(targetDirectory);
-        Process(vaultPath, secret, Path.GetFullPath(targetDirectory), progress, cancellationToken);
+        Process(vaultPath, secret, Path.GetFullPath(targetDirectory), progress, cancellationToken, machineKey);
     }
 
     public void Verify(
         string vaultPath,
         ReadOnlySpan<char> secret,
         IProgress<VaultProgress>? progress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        byte[]? machineKey = null)
     {
-        Process(vaultPath, secret, targetDirectory: null, progress, cancellationToken);
+        Process(vaultPath, secret, targetDirectory: null, progress, cancellationToken, machineKey);
     }
 
     private static void Process(
@@ -234,10 +259,11 @@ public sealed class VaultEncryptor
         ReadOnlySpan<char> secret,
         string? targetDirectory,
         IProgress<VaultProgress>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        byte[]? machineKey)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(vaultPath);
-        if (secret.IsEmpty)
+        if (secret.IsEmpty && machineKey is null)
         {
             throw new ArgumentException("Secret must not be empty.", nameof(secret));
         }
@@ -250,10 +276,10 @@ public sealed class VaultEncryptor
         var total = Math.Max(0, input.Length - headerSize);
         progress?.Report(new VaultProgress(0, total));
 
-        var dek = Unwrap(header, secret);
+        var dek = Unwrap(header, secret, machineKey);
         try
         {
-            if (header.Version >= CurrentVersion)
+            if (header.Version >= VersionV2)
             {
                 VerifyHeaderMac(header, dek);
             }
@@ -272,7 +298,7 @@ public sealed class VaultEncryptor
                 headerSize,
                 cancellationToken,
                 header.IsCompressed,
-                requireTrailer: header.Version >= CurrentVersion);
+                requireTrailer: header.Version >= VersionV2);
 
             progress?.Report(new VaultProgress(total, total));
         }
@@ -291,11 +317,11 @@ public sealed class VaultEncryptor
         return new VaultHeaderInfo(header.Version, header.HasRecovery, header.IsCompressed, header.Iterations, input.Length);
     }
 
-    public bool TryVerify(string vaultPath, ReadOnlySpan<char> secret)
+    public bool TryVerify(string vaultPath, ReadOnlySpan<char> secret, byte[]? machineKey = null)
     {
         try
         {
-            Verify(vaultPath, secret);
+            Verify(vaultPath, secret, machineKey: machineKey);
             return true;
         }
         catch (Exception ex) when (IsVerificationFailure(ex))
@@ -304,16 +330,142 @@ public sealed class VaultEncryptor
         }
     }
 
-    public SalvageResult SalvageToDirectory(string vaultPath, string targetDirectory, ReadOnlySpan<char> secret)
+    public SalvageResult SalvageToDirectory(
+        string vaultPath,
+        string targetDirectory,
+        ReadOnlySpan<char> secret,
+        byte[]? machineKey = null)
     {
         try
         {
-            DecryptToDirectory(vaultPath, targetDirectory, secret);
+            DecryptToDirectory(vaultPath, targetDirectory, secret, machineKey: machineKey);
             return new SalvageResult(true, null);
         }
         catch (Exception ex) when (IsVerificationFailure(ex) || ex is IOException or UnauthorizedAccessException)
         {
             return new SalvageResult(false, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// 把 v2 容器显式升级为 v3：写入 4096 字节新头部，数据区按原始字节整体平移复制，
+    /// 不重新加密。升级前保留 <c>.bak</c>，临时文件校验通过后才替换原文件。
+    /// 已经是 v3 的容器直接返回现有槽。
+    /// </summary>
+    public IReadOnlyList<VaultKeySlot> UpgradeV2ToV3(
+        string vaultPath,
+        ReadOnlySpan<char> secret,
+        bool keepBackup = true)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(vaultPath);
+        if (secret.IsEmpty)
+        {
+            throw new ArgumentException("Secret must not be empty.", nameof(secret));
+        }
+
+        var vaultFull = Path.GetFullPath(vaultPath);
+        var tempPath = vaultFull + "." + Guid.NewGuid().ToString("N") + ".v3tmp";
+
+        byte[]? dek = null;
+        try
+        {
+            List<VaultKeySlot> slots;
+
+            // 读取流必须在替换原文件前关闭：Windows 下仍持有句柄时 File.Move 覆盖会失败。
+            using (var input = new FileStream(vaultFull, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                var header = ReadHeader(input);
+                if (header.Version == CurrentVersion)
+                {
+                    return header.V3!.Slots;
+                }
+
+                if (header.Version != VersionV2)
+                {
+                    throw new VaultException("仅支持将 v2 容器升级为 v3。");
+                }
+
+                dek = Unwrap(header, secret, machineKey: null);
+                VerifyHeaderMac(header, dek);
+
+                slots = new List<VaultKeySlot>
+                {
+                    new(
+                        Guid.NewGuid(),
+                        VaultSlotKind.Password,
+                        VaultKdf.Pbkdf2,
+                        (uint)header.Iterations,
+                        0,
+                        0,
+                        header.SaltPassword,
+                        header.WrappedByPassword),
+                };
+
+                if (header.HasRecovery)
+                {
+                    slots.Add(new VaultKeySlot(
+                        Guid.NewGuid(),
+                        VaultSlotKind.RecoveryCode,
+                        VaultKdf.Pbkdf2,
+                        (uint)header.Iterations,
+                        0,
+                        0,
+                        header.SaltRecovery,
+                        header.WrappedByRecovery));
+                }
+
+                var block = VaultHeaderV3.BuildBlock(slots, sequence: 1, header.IsCompressed, dek);
+                var oldHeaderSize = HeaderSizeFor(header.Version);
+                var originalLength = input.Length;
+                var required = Math.Max(0, HeaderSizeV3 - oldHeaderSize) +
+                               (keepBackup ? originalLength : 0);
+                var root = Path.GetPathRoot(vaultFull);
+                if (!string.IsNullOrEmpty(root) && new DriveInfo(root).AvailableFreeSpace < required)
+                {
+                    throw new VaultException("磁盘剩余空间不足，无法完成升级。");
+                }
+
+                using var output = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                VaultHeaderV3.WriteInitialHeader(output, block);
+                input.Position = oldHeaderSize;
+                input.CopyTo(output);
+                output.Flush(flushToDisk: true);
+            }
+
+            // 临时文件必须能用同一秘密解开并通过 HMAC 校验，才允许替换原文件。
+            using (var check = new FileStream(tempPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                var checkHeader = ReadHeader(check);
+                var checkDek = Unwrap(checkHeader, secret, machineKey: null);
+                try
+                {
+                    VerifyHeaderMac(checkHeader, checkDek);
+                }
+                finally
+                {
+                    Array.Clear(checkDek);
+                }
+            }
+
+            if (keepBackup)
+            {
+                File.Copy(vaultFull, vaultFull + ".bak", overwrite: true);
+            }
+
+            File.Move(tempPath, vaultFull, overwrite: true);
+            return slots;
+        }
+        catch
+        {
+            TryDeleteTemp(tempPath);
+            throw;
+        }
+        finally
+        {
+            if (dek is not null)
+            {
+                Array.Clear(dek);
+            }
         }
     }
 
@@ -327,7 +479,12 @@ public sealed class VaultEncryptor
             or NotSupportedException;
     }
 
-    private static int HeaderSizeFor(byte version) => version >= CurrentVersion ? HeaderSizeV2 : BaseHeaderSize;
+    private static int HeaderSizeFor(byte version) => version switch
+    {
+        CurrentVersion => HeaderSizeV3,
+        VersionV2 => HeaderSizeV2,
+        _ => BaseHeaderSize,
+    };
 
     private static void TryDeleteTemp(string path)
     {
@@ -343,14 +500,30 @@ public sealed class VaultEncryptor
         }
     }
 
-    private static byte[] Unwrap(Header header, ReadOnlySpan<char> secret)
+    private static byte[] Unwrap(Header header, ReadOnlySpan<char> secret, byte[]? machineKey)
     {
-        var kekPassword = PasswordHasher.Derive(secret, header.SaltPassword, header.Iterations, KeySize);
-        var dek = UnwrapKey(kekPassword, header.WrappedByPassword);
-        Array.Clear(kekPassword);
-        if (dek is not null)
+        if (header.V3 is not null)
         {
-            return dek;
+            var dek = header.V3.TryUnwrap(secret, machineKey);
+            if (dek is not null)
+            {
+                return dek;
+            }
+
+            if (!header.V3.HasSecretSlots && !header.V3.HasMachineSlots)
+            {
+                throw new VaultException("容器没有可用解锁通道。");
+            }
+
+            throw new VaultException("密码或恢复码不正确。");
+        }
+
+        var kekPassword = PasswordHasher.Derive(secret, header.SaltPassword, header.Iterations, KeySize);
+        var dekV2 = UnwrapKey(kekPassword, header.WrappedByPassword);
+        Array.Clear(kekPassword);
+        if (dekV2 is not null)
+        {
+            return dekV2;
         }
 
         if (header.HasRecovery)
@@ -360,11 +533,11 @@ public sealed class VaultEncryptor
                 header.SaltRecovery,
                 header.Iterations,
                 KeySize);
-            dek = UnwrapKey(kekRecovery, header.WrappedByRecovery);
+            dekV2 = UnwrapKey(kekRecovery, header.WrappedByRecovery);
             Array.Clear(kekRecovery);
-            if (dek is not null)
+            if (dekV2 is not null)
             {
-                return dek;
+                return dekV2;
             }
         }
 
@@ -679,6 +852,12 @@ public sealed class VaultEncryptor
 
     private static void VerifyHeaderMac(Header header, byte[] dek)
     {
+        if (header.V3 is not null)
+        {
+            header.V3.VerifyMac(dek);
+            return;
+        }
+
         if (header.Mac is null)
         {
             throw new VaultException("Vault 头部校验失败，文件可能被篡改。");
@@ -693,25 +872,57 @@ public sealed class VaultEncryptor
 
     private static Header ReadHeader(Stream input)
     {
-        var prefix = new byte[BaseHeaderSize];
+        if (input.CanSeek)
+        {
+            input.Position = 0;
+        }
+
+        // v3 的 A 块可能已被清零（只保留 B 块），不能只看文件前 7 字节判断版本。
+        if (VaultHeaderV3.IsV3(input))
+        {
+            return ReadV3Header(input);
+        }
+
+        if (input.CanSeek)
+        {
+            input.Position = 0;
+        }
+
+        Span<byte> head = stackalloc byte[7];
         try
         {
-            input.ReadExactly(prefix);
+            input.ReadExactly(head);
         }
         catch (EndOfStreamException ex)
         {
             throw new VaultException("Vault 文件损坏或长度不足。", ex);
         }
 
-        if (!prefix.AsSpan(0, 6).SequenceEqual(Encoding.ASCII.GetBytes(Magic)))
+        if (!head[..6].SequenceEqual(Encoding.ASCII.GetBytes(Magic)))
         {
             throw new VaultException("不是有效的 FolderLock Vault 文件。");
         }
 
-        var version = prefix[6];
-        if (version is not (LegacyVersion or CurrentVersion))
+        var version = head[6];
+        if (version == CurrentVersion)
+        {
+            return ReadV3Header(input);
+        }
+
+        if (version is not (LegacyVersion or VersionV2))
         {
             throw new VaultException($"不支持的 Vault 版本：{version}");
+        }
+
+        var prefix = new byte[BaseHeaderSize];
+        try
+        {
+            input.Position = 0;
+            input.ReadExactly(prefix);
+        }
+        catch (EndOfStreamException ex)
+        {
+            throw new VaultException("Vault 文件损坏或长度不足。", ex);
         }
 
         var flags = prefix[7];
@@ -725,7 +936,7 @@ public sealed class VaultEncryptor
         }
 
         byte[] mac = Array.Empty<byte>();
-        if (version >= CurrentVersion)
+        if (version >= VersionV2)
         {
             mac = new byte[HeaderMacSize];
             try
@@ -748,7 +959,30 @@ public sealed class VaultEncryptor
             prefix.AsSpan(44, WrappedSize).ToArray(),
             prefix.AsSpan(44 + WrappedSize, WrappedSize).ToArray(),
             prefix,
-            mac);
+            mac,
+            null);
+    }
+
+    private static Header ReadV3Header(Stream input)
+    {
+        if (input.CanSeek)
+        {
+            input.Position = 0;
+        }
+
+        var header = VaultHeaderV3.Read(input);
+        return new Header(
+            CurrentVersion,
+            header.HasRecovery,
+            header.IsCompressed,
+            header.Iterations,
+            Array.Empty<byte>(),
+            Array.Empty<byte>(),
+            Array.Empty<byte>(),
+            Array.Empty<byte>(),
+            Array.Empty<byte>(),
+            Array.Empty<byte>(),
+            header);
     }
 
     private static byte[] WrapKey(byte[] kek, byte[] dek)
@@ -803,7 +1037,8 @@ public sealed class VaultEncryptor
         byte[] WrappedByPassword,
         byte[] WrappedByRecovery,
         byte[] RawPrefix,
-        byte[] Mac);
+        byte[] Mac,
+        VaultHeaderV3? V3);
 
     private sealed class ChunkedAeadWriter : Stream
     {

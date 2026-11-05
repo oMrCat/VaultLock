@@ -25,6 +25,9 @@ public sealed class FolderService
     private readonly SecureDeleter _secureDeleter;
     private readonly TraceCleaner _traceCleaner;
     private readonly WatchlistStore _watchlist;
+    private readonly VaultSlotManager _slotManager;
+    private readonly VaultRecovery _recovery;
+    private readonly LocalUnlockKeyStore _localUnlockKeys;
 
     public FolderService(
         FolderStore store,
@@ -32,15 +35,20 @@ public sealed class FolderService
         VaultEncryptor? vault = null,
         SecureDeleter? secureDeleter = null,
         TraceCleaner? traceCleaner = null,
-        WatchlistStore? watchlist = null)
+        WatchlistStore? watchlist = null,
+        VaultSlotManager? slotManager = null,
+        VaultRecovery? recovery = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _locker = locker ?? throw new ArgumentNullException(nameof(locker));
         _vault = vault ?? new VaultEncryptor();
+        _slotManager = slotManager ?? new VaultSlotManager(_vault);
+        _recovery = recovery ?? new VaultRecovery(_vault);
         _secureDeleter = secureDeleter ?? new SecureDeleter();
         _traceCleaner = traceCleaner ?? new TraceCleaner();
         _watchlist = watchlist ?? new WatchlistStore();
         _store.Initialize();
+        _localUnlockKeys = new LocalUnlockKeyStore(_store);
     }
 
     public TraceCleanResult? LastTraceClean { get; private set; }
@@ -260,6 +268,39 @@ public sealed class FolderService
             cancellationToken);
     }
 
+    /// <summary>使用 DPAPI 保护的本机 KEK 解锁加密容器（kdf=2 槽）。</summary>
+    public void UnlockViaDpapi(
+        long id,
+        IProgress<VaultProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var record = Require(id);
+        try
+        {
+            if (!record.IsLocked)
+            {
+                throw new FolderLockException("该文件夹当前未锁定。");
+            }
+
+            if (record.EncryptionMode != EncryptionMode.Aes256Gcm)
+            {
+                throw new FolderLockException("只有加密容器模式支持本机自动解锁。");
+            }
+
+            var machineKey = _localUnlockKeys.TryGet(record.Id)
+                ?? throw new FolderLockException("未开启本机自动解锁，或当前用户的 DPAPI 密钥不可用。");
+
+            UnlockEncrypted(record, ReadOnlySpan<char>.Empty, progress, cancellationToken, machineKey);
+            UpdateWatchlist();
+            Audit(AuditAction.UnlockViaDpapi, record, true);
+        }
+        catch (Exception ex)
+        {
+            Audit(AuditAction.UnlockViaDpapi, record, false, ex.Message);
+            throw;
+        }
+    }
+
     public Task UnlockAsync(
         long id,
         Secret password,
@@ -297,6 +338,411 @@ public sealed class FolderService
         _store.Update(record);
         Audit(AuditAction.ChangePassword, record, true);
     }
+
+    // ===== 密钥槽、恢复向导与密码提示（P1） =====
+
+    /// <summary>列出锁定容器的密钥槽（只读头部，不需要 DEK）。</summary>
+    public IReadOnlyList<VaultSlotInfo> ListKeySlots(long id)
+    {
+        var record = Require(id);
+        ValidateLockedVault(record);
+        return _slotManager.ListSlots(record.VaultPath!);
+    }
+
+    /// <summary>生成“忘记密码”向导的可选通道清单。</summary>
+    public VaultRecoveryPlan PlanRecovery(long id, string? recoveryKitPath = null)
+    {
+        var record = Require(id);
+        ValidateLockedVault(record);
+        return _recovery.Plan(
+            record.VaultPath!,
+            _store.GetVaultKeySlots(id),
+            hasRecoveryKit: !string.IsNullOrWhiteSpace(recoveryKitPath) && File.Exists(recoveryKitPath),
+            machineKeyAvailable: _localUnlockKeys.TryGet(id) is not null);
+    }
+
+    /// <summary>逐个尝试恢复通道，失败计入与密码相同的失败限流。</summary>
+    public VaultRecoveryResult TryRecoveryChannel(
+        long id,
+        VaultRecoveryChannelType channel,
+        Secret secret)
+    {
+        ArgumentNullException.ThrowIfNull(secret);
+
+        var record = Require(id);
+        ValidateLockedVault(record);
+        EnsureNotLockedOut(record);
+
+        var machineKey = channel == VaultRecoveryChannelType.DpapiUser
+            ? _localUnlockKeys.TryGet(id)
+            : null;
+
+        var result = _recovery.TryChannel(record.VaultPath!, channel, secret, machineKey);
+        if (result.Outcome == VaultRecoveryOutcome.WrongKey)
+        {
+            RegisterFailure(record, $"恢复通道 {channel} 密钥错误");
+        }
+        else if (result.Outcome == VaultRecoveryOutcome.Success)
+        {
+            ClearFailures(record);
+        }
+
+        return result;
+    }
+
+    /// <summary>恢复向导成功后的“设置新密码”：只替换头部密码槽，不重新加密数据。</summary>
+    public void RecoverWithNewPassword(long id, Secret workingSecret, Secret newPassword)
+    {
+        ArgumentNullException.ThrowIfNull(workingSecret);
+        ArgumentNullException.ThrowIfNull(newPassword);
+        if (newPassword.IsEmpty)
+        {
+            throw new FolderLockException("新密码不能为空。");
+        }
+
+        var record = Require(id);
+        ValidateLockedVault(record);
+        EnsureV3(record, workingSecret);
+
+        var path = record.VaultPath!;
+        var slots = _slotManager.ListSlots(path);
+        var passwordSlot = slots.FirstOrDefault(slot =>
+            slot.Kind == VaultSlotKind.Password && slot.IsSupported);
+
+        var spec = new VaultSlotSpec(VaultSlotKind.Password, "主密码", newPassword);
+        if (passwordSlot is null)
+        {
+            _slotManager.AddSlot(path, workingSecret, spec);
+        }
+        else
+        {
+            _slotManager.ReplaceSlot(path, workingSecret, passwordSlot.Id, spec);
+        }
+
+        record.PasswordHash = PasswordHasher.Hash(newPassword.Span).Encode();
+        ClearFailures(record);
+        _store.Update(record);
+        SyncSlotMetadata(record);
+        Audit(AuditAction.RotateSecret, record, true, "恢复后设置新密码");
+    }
+
+    /// <summary>添加应急密码槽。</summary>
+    public VaultKeySlot AddEmergencyPassword(long id, Secret currentPassword, Secret emergencyPassword)
+    {
+        ArgumentNullException.ThrowIfNull(currentPassword);
+        ArgumentNullException.ThrowIfNull(emergencyPassword);
+        if (emergencyPassword.IsEmpty)
+        {
+            throw new FolderLockException("应急密码不能为空。");
+        }
+
+        var record = Require(id);
+        ValidateLockedVault(record);
+        EnsureV3(record, currentPassword);
+
+        var slot = _slotManager.AddSlot(
+            record.VaultPath!,
+            currentPassword,
+            new VaultSlotSpec(VaultSlotKind.EmergencyPassword, "应急密码", emergencyPassword));
+
+        AppendSlotRecord(record, slot, SecretProtector.Protect(new string(emergencyPassword.Span)));
+        Audit(AuditAction.AddKeySlot, record, true, $"应急密码槽 {slot.Id}");
+        return slot;
+    }
+
+    /// <summary>删除任意密钥槽（不会允许删除最后一个主密码槽）。</summary>
+    public void RemoveKeySlot(long id, Secret currentPassword, Guid slotId)
+    {
+        ArgumentNullException.ThrowIfNull(currentPassword);
+
+        var record = Require(id);
+        ValidateLockedVault(record);
+        EnsureV3(record, currentPassword);
+
+        _slotManager.RemoveSlot(record.VaultPath!, currentPassword, slotId);
+        SyncSlotMetadata(record);
+        Audit(AuditAction.RemoveKeySlot, record, true, $"槽 {slotId}");
+    }
+
+    /// <summary>开启本机自动解锁：生成 DPAPI 保护的机器 KEK 并写入 kdf=2 槽。</summary>
+    public void EnableLocalUnlock(long id, Secret currentPassword)
+    {
+        ArgumentNullException.ThrowIfNull(currentPassword);
+
+        var record = Require(id);
+        ValidateLockedVault(record);
+        EnsureV3(record, currentPassword);
+
+        var slots = _slotManager.ListSlots(record.VaultPath!);
+        if (slots.Any(slot => slot.Kind == VaultSlotKind.DpapiUser))
+        {
+            return;
+        }
+
+        var machineKey = _localUnlockKeys.GetOrCreate(id);
+        var slot = _slotManager.AddSlot(
+            record.VaultPath!,
+            currentPassword,
+            new VaultSlotSpec(VaultSlotKind.DpapiUser, "本机自动解锁", MachineKey: machineKey));
+
+        AppendSlotRecord(record, slot, null, "本机自动解锁");
+        Audit(AuditAction.AddKeySlot, record, true, $"DPAPI 槽 {slot.Id}");
+    }
+
+    /// <summary>关闭本机自动解锁：删除 DPAPI 槽与数据库中的机器 KEK。</summary>
+    public void DisableLocalUnlock(long id, Secret currentPassword)
+    {
+        ArgumentNullException.ThrowIfNull(currentPassword);
+
+        var record = Require(id);
+        ValidateLockedVault(record);
+
+        var version = _vault.ReadHeaderInfo(record.VaultPath!).Version;
+        if (version == VaultHeaderV3.FormatVersion)
+        {
+            var slots = _slotManager.ListSlots(record.VaultPath!);
+            foreach (var slot in slots.Where(slot => slot.Kind == VaultSlotKind.DpapiUser))
+            {
+                _slotManager.RemoveSlot(record.VaultPath!, currentPassword, slot.Id);
+            }
+
+            SyncSlotMetadata(record);
+        }
+
+        _localUnlockKeys.Remove(id);
+        Audit(AuditAction.RemoveKeySlot, record, true, "删除 DPAPI 槽");
+    }
+
+    public bool IsLocalUnlockEnabled(long id) => _store.GetLocalUnlockKey(id) is not null;
+
+    /// <summary>读取密码提示（DPAPI 保护，仅本机本用户可见）。</summary>
+    public string? GetPasswordHint(long id)
+    {
+        var record = Require(id);
+        return record.PasswordHintProtected is null
+            ? null
+            : SecretProtector.Unprotect(record.PasswordHintProtected);
+    }
+
+    /// <summary>设置或清除密码提示。需要验证当前密码。</summary>
+    public void SetPasswordHint(long id, Secret currentPassword, string? hint)
+    {
+        ArgumentNullException.ThrowIfNull(currentPassword);
+
+        var record = Require(id);
+        VerifyPassword(record, currentPassword.Span);
+
+        record.PasswordHintProtected = string.IsNullOrWhiteSpace(hint)
+            ? null
+            : SecretProtector.Protect(hint.Trim());
+        _store.Update(record);
+        Audit(AuditAction.ChangePassword, record, true, "更新密码提示");
+    }
+
+    /// <summary>验证密码后再次查看恢复码，并记录查看时间。</summary>
+    /// <param name="currentPassword">主密码；7 天查看窗口内可为 null。</param>
+    public string? RevealRecoveryCode(long id, Secret? currentPassword = null)
+    {
+        var record = Require(id);
+
+        if (currentPassword is null)
+        {
+            if (!CanRevealRecoveryCodeWithoutPassword(record))
+            {
+                throw new FolderLockException("恢复码查看窗口已过期，请输入主密码。");
+            }
+        }
+        else
+        {
+            VerifyPassword(record, currentPassword.Span);
+        }
+
+        var code = record.ProtectedRecoveryCode is null
+            ? null
+            : SecretProtector.Unprotect(record.ProtectedRecoveryCode);
+        if (code is not null)
+        {
+            var slot = _store.GetVaultKeySlots(id)
+                .FirstOrDefault(slotRecord => slotRecord.Kind == VaultSlotKind.RecoveryCode);
+            if (slot is not null)
+            {
+                _store.MarkVaultKeySlotRevealed(slot.SlotId, DateTimeOffset.UtcNow);
+            }
+
+            Audit(AuditAction.RevealRecoveryCode, record, true, slot is null ? null : $"槽 {slot.SlotId}");
+        }
+
+        return code;
+    }
+
+    /// <summary>创建后 7 天内可凭已解锁状态再次查看恢复码。</summary>
+    public bool CanRevealRecoveryCodeWithoutPassword(long id) => CanRevealRecoveryCodeWithoutPassword(Require(id));
+
+    private bool CanRevealRecoveryCodeWithoutPassword(FolderRecord record)
+    {
+        if (record.ProtectedRecoveryCode is null)
+        {
+            return false;
+        }
+
+        var slot = _store.GetVaultKeySlots(record.Id)
+            .FirstOrDefault(slotRecord => slotRecord.Kind == VaultSlotKind.RecoveryCode);
+
+        // 没有槽记录（旧的 v2 容器）时按“最近创建”处理，仍要求主密码更安全。
+        var windowStart = slot?.LastRevealedAt ?? slot?.CreatedAt;
+        return windowStart is not null &&
+               DateTimeOffset.UtcNow - windowStart.Value <= TimeSpan.FromDays(7);
+    }
+
+    public void MarkRecoveryCodeBackedUp(long id)
+    {
+        var record = Require(id);
+        record.RecoveryBackedUpAt = DateTimeOffset.UtcNow;
+        _store.Update(record);
+    }
+
+    /// <summary>30 天未确认备份恢复码时返回 true。</summary>
+    public bool NeedsRecoveryBackupReminder(long id)
+    {
+        var record = Require(id);
+        if (record.ProtectedRecoveryCode is null)
+        {
+            return false;
+        }
+
+        return record.RecoveryBackedUpAt is null ||
+               DateTimeOffset.UtcNow - record.RecoveryBackedUpAt.Value > TimeSpan.FromDays(30);
+    }
+
+    private void ValidateLockedVault(FolderRecord record)
+    {
+        if (record.EncryptionMode != EncryptionMode.Aes256Gcm)
+        {
+            throw new FolderLockException("只有加密容器模式支持密钥槽管理。");
+        }
+
+        if (!record.IsLocked)
+        {
+            throw new FolderLockException("请先锁定文件夹后再管理密钥槽。");
+        }
+
+        if (record.VaultPath is null || !File.Exists(record.VaultPath))
+        {
+            throw new FolderLockException("找不到加密容器文件。");
+        }
+    }
+
+    private void EnsureV3(FolderRecord record, Secret workingSecret)
+    {
+        var path = record.VaultPath!;
+        var info = _vault.ReadHeaderInfo(path);
+        if (info.Version == VaultHeaderV3.FormatVersion)
+        {
+            return;
+        }
+
+        if (info.Version != 2)
+        {
+            throw new FolderLockException("仅支持将 v2 容器升级为 v3。");
+        }
+
+        _slotManager.UpgradeToV3(path, workingSecret, keepBackup: true);
+        Audit(AuditAction.UpgradeVault, record, true, $"v{info.Version} → v3");
+    }
+
+    private void SaveCreatedSlotMetadata(FolderRecord record, string vaultPath, string? recoveryCode)
+    {
+        var priorEmergency = _store.GetVaultKeySlots(record.Id)
+            .Where(slot => slot.Kind == VaultSlotKind.EmergencyPassword)
+            .ToList();
+        var emergencyIndex = 0;
+        var now = DateTimeOffset.UtcNow;
+        var records = new List<VaultKeySlotRecord>();
+
+        foreach (var info in _slotManager.ListSlots(vaultPath))
+        {
+            string? protectedSecret = null;
+            var label = DefaultSlotLabel(info.Kind);
+            if (info.Kind == VaultSlotKind.RecoveryCode && recoveryCode is not null)
+            {
+                protectedSecret = SecretProtector.Protect(recoveryCode);
+            }
+            else if (info.Kind == VaultSlotKind.EmergencyPassword &&
+                     emergencyIndex < priorEmergency.Count)
+            {
+                var prior = priorEmergency[emergencyIndex++];
+                protectedSecret = prior.ProtectedSecret;
+                label = prior.Label ?? label;
+            }
+
+            records.Add(new VaultKeySlotRecord
+            {
+                SlotId = info.Id,
+                FolderId = record.Id,
+                Kind = info.Kind,
+                Label = label,
+                ProtectedSecret = protectedSecret,
+                CreatedAt = now,
+            });
+        }
+
+        _store.ReplaceVaultKeySlots(record.Id, records);
+    }
+
+    private void SyncSlotMetadata(FolderRecord record)
+    {
+        var existing = _store.GetVaultKeySlots(record.Id)
+            .ToDictionary(slot => slot.SlotId);
+        var now = DateTimeOffset.UtcNow;
+        var records = new List<VaultKeySlotRecord>();
+
+        foreach (var info in _slotManager.ListSlots(record.VaultPath!))
+        {
+            var prior = existing.GetValueOrDefault(info.Id);
+            records.Add(new VaultKeySlotRecord
+            {
+                SlotId = info.Id,
+                FolderId = record.Id,
+                Kind = info.Kind,
+                Label = prior?.Label ?? DefaultSlotLabel(info.Kind),
+                ProtectedSecret = prior?.ProtectedSecret,
+                CreatedAt = prior?.CreatedAt ?? now,
+                LastRevealedAt = prior?.LastRevealedAt,
+            });
+        }
+
+        _store.ReplaceVaultKeySlots(record.Id, records);
+    }
+
+    private void AppendSlotRecord(
+        FolderRecord record,
+        VaultKeySlot slot,
+        string? protectedSecret,
+        string? label = null)
+    {
+        var records = _store.GetVaultKeySlots(record.Id).ToList();
+        records.Add(new VaultKeySlotRecord
+        {
+            SlotId = slot.Id,
+            FolderId = record.Id,
+            Kind = slot.Kind,
+            Label = label ?? DefaultSlotLabel(slot.Kind),
+            ProtectedSecret = protectedSecret,
+            CreatedAt = DateTimeOffset.UtcNow,
+        });
+        _store.ReplaceVaultKeySlots(record.Id, records);
+    }
+
+    private static string DefaultSlotLabel(VaultSlotKind kind) => kind switch
+    {
+        VaultSlotKind.Password => "主密码",
+        VaultSlotKind.RecoveryCode => "恢复码",
+        VaultSlotKind.EmergencyPassword => "应急密码",
+        VaultSlotKind.DpapiUser => "本机自动解锁",
+        VaultSlotKind.Tpm => "TPM",
+        VaultSlotKind.WindowsHello => "Windows Hello",
+        _ => "密钥槽",
+    };
 
     public void Remove(long id, string password)
     {
@@ -418,6 +864,51 @@ public sealed class FolderService
         }
 
         return _vault.SalvageToDirectory(record.VaultPath, targetDirectory, secret.Span);
+    }
+
+    /// <summary>只读取头部信息，可用于右键菜单对任意 .flvault 文件的校验。</summary>
+    public VaultHeaderInfo InspectVaultFile(string vaultPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(vaultPath);
+        EnsureVaultFileExists(vaultPath);
+        return _vault.ReadHeaderInfo(vaultPath);
+    }
+
+    /// <summary>校验任意 .flvault 文件；失败返回 false，而不是抛出异常。</summary>
+    public bool VerifyVaultFile(string vaultPath, Secret secret)
+    {
+        ArgumentNullException.ThrowIfNull(secret);
+        ArgumentException.ThrowIfNullOrWhiteSpace(vaultPath);
+        EnsureVaultFileExists(vaultPath);
+        return _vault.TryVerify(vaultPath, secret.Span);
+    }
+
+    /// <summary>把任意 .flvault 文件解密到指定文件夹。</summary>
+    public void DecryptVaultFile(string vaultPath, string targetDirectory, Secret secret)
+    {
+        ArgumentNullException.ThrowIfNull(secret);
+        ArgumentException.ThrowIfNullOrWhiteSpace(vaultPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(targetDirectory);
+        EnsureVaultFileExists(vaultPath);
+        _vault.DecryptToDirectory(vaultPath, targetDirectory, secret.Span);
+    }
+
+    /// <summary>抢救任意 .flvault 文件，尽量还原可读内容。</summary>
+    public SalvageResult SalvageVaultFile(string vaultPath, Secret secret, string targetDirectory)
+    {
+        ArgumentNullException.ThrowIfNull(secret);
+        ArgumentException.ThrowIfNullOrWhiteSpace(vaultPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(targetDirectory);
+        EnsureVaultFileExists(vaultPath);
+        return _vault.SalvageToDirectory(vaultPath, targetDirectory, secret.Span);
+    }
+
+    private static void EnsureVaultFileExists(string vaultPath)
+    {
+        if (!File.Exists(vaultPath))
+        {
+            throw new FolderLockException($"找不到加密容器文件：{vaultPath}");
+        }
     }
 
     public int ExportKit(string kitPath, Secret passphrase)
@@ -673,8 +1164,29 @@ public sealed class FolderService
 
         var created = false;
         var report = new VaultEncryptionReport();
+        var machineKey = _localUnlockKeys.TryGet(record.Id);
+        var extraSecrets = new List<Secret>();
+        var extraSlots = new List<VaultSlotSpec>();
         try
         {
+            foreach (var slotRecord in _store.GetVaultKeySlots(record.Id))
+            {
+                if (slotRecord.Kind != VaultSlotKind.EmergencyPassword ||
+                    slotRecord.ProtectedSecret is null)
+                {
+                    continue;
+                }
+
+                var plain = SecretProtector.Unprotect(slotRecord.ProtectedSecret)
+                    ?? throw new FolderLockException("应急密码记录已损坏，无法重新写入容器。");
+                var secret = new Secret(plain);
+                extraSecrets.Add(secret);
+                extraSlots.Add(new VaultSlotSpec(
+                    VaultSlotKind.EmergencyPassword,
+                    slotRecord.Label,
+                    secret));
+            }
+
             _vault.EncryptDirectory(
                 record.Path,
                 vaultPath,
@@ -685,11 +1197,15 @@ public sealed class FolderService
                 cancellationToken,
                 compress: CompressVaults,
                 overwrite: false,
-                report: report);
+                report: report,
+                machineKey: machineKey,
+                extraSlots: extraSlots);
 
             created = true;
             cancellationToken.ThrowIfCancellationRequested();
             _vault.Verify(vaultPath, password);
+
+            SaveCreatedSlotMetadata(record, vaultPath, recoveryCode);
         }
         catch (OperationCanceledException)
         {
@@ -709,6 +1225,13 @@ public sealed class FolderService
             }
 
             throw new FolderLockException($"加密失败：{ex.Message}", ex);
+        }
+        finally
+        {
+            foreach (var secret in extraSecrets)
+            {
+                secret.Dispose();
+            }
         }
 
         // 先落库再擦除：擦除阶段中途失败时，容器仍是唯一完整副本，
@@ -745,7 +1268,8 @@ public sealed class FolderService
         FolderRecord record,
         ReadOnlySpan<char> secret,
         IProgress<VaultProgress>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        byte[]? machineKey = null)
     {
         if (record.VaultPath is null || !File.Exists(record.VaultPath))
         {
@@ -761,7 +1285,13 @@ public sealed class FolderService
 
         try
         {
-            _vault.DecryptToDirectory(record.VaultPath, record.Path, secret, progress, cancellationToken);
+            _vault.DecryptToDirectory(
+                record.VaultPath,
+                record.Path,
+                secret,
+                progress,
+                cancellationToken,
+                machineKey);
         }
         catch (OperationCanceledException)
         {
@@ -838,35 +1368,51 @@ public sealed class FolderService
             throw new FolderLockException("该文件夹尚未设置密码。");
         }
 
-        var now = DateTimeOffset.UtcNow;
-        if (record.LockoutUntil is { } until && until > now)
-        {
-            var seconds = Math.Ceiling((until - now).TotalSeconds);
-            throw new FolderLockException($"尝试次数过多，请在 {seconds:0} 秒后重试。");
-        }
+        EnsureNotLockedOut(record);
 
         var stored = PasswordHash.Decode(record.PasswordHash);
         if (!PasswordHasher.Verify(password, stored))
         {
-            record.FailedAttempts++;
-            var lockout = GetLockout(record.FailedAttempts);
-            if (lockout > TimeSpan.Zero)
-            {
-                record.LockoutUntil = now + lockout;
-            }
-
-            _store.Update(record);
-            Audit(AuditAction.FailedAttempt, record, false, $"连续失败 {record.FailedAttempts} 次");
-
-            if (record.LockoutUntil is { } next && next > now)
-            {
-                var seconds = Math.Ceiling((next - now).TotalSeconds);
-                throw new FolderLockException($"密码错误。已连续失败 {record.FailedAttempts} 次，请在 {seconds:0} 秒后重试。");
-            }
-
+            RegisterFailure(record, "连续失败");
             throw new FolderLockException("密码错误。");
         }
 
+        ClearFailures(record);
+    }
+
+    /// <summary>失败限流：5 次 30 秒、7 次 5 分钟、10 次 30 分钟，密码与恢复通道共用。</summary>
+    private void EnsureNotLockedOut(FolderRecord record)
+    {
+        if (record.LockoutUntil is { } until && until > DateTimeOffset.UtcNow)
+        {
+            var seconds = Math.Ceiling((until - DateTimeOffset.UtcNow).TotalSeconds);
+            throw new FolderLockException($"尝试次数过多，请在 {seconds:0} 秒后重试。");
+        }
+    }
+
+    private void RegisterFailure(FolderRecord record, string detail)
+    {
+        var now = DateTimeOffset.UtcNow;
+        record.FailedAttempts++;
+        var lockout = GetLockout(record.FailedAttempts);
+        if (lockout > TimeSpan.Zero)
+        {
+            record.LockoutUntil = now + lockout;
+        }
+
+        _store.Update(record);
+        Audit(AuditAction.FailedAttempt, record, false, $"{detail} {record.FailedAttempts} 次");
+
+        if (record.LockoutUntil is { } next && next > now)
+        {
+            var seconds = Math.Ceiling((next - now).TotalSeconds);
+            throw new FolderLockException(
+                $"已连续失败 {record.FailedAttempts} 次，请在 {seconds:0} 秒后重试。");
+        }
+    }
+
+    private void ClearFailures(FolderRecord record)
+    {
         if (record.FailedAttempts != 0 || record.LockoutUntil is not null)
         {
             record.FailedAttempts = 0;

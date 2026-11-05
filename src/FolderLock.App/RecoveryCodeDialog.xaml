@@ -42,6 +42,7 @@
             <StackPanel Orientation="Horizontal"
                         HorizontalAlignment="Right"
                         Margin="0,18,0,0">
+                <ui:Button Content="{local:Loc Dialog.Print}" Width="88" Margin="0,0,8,0" Click="Print_Click" />
                 <ui:Button Content="{local:Loc Dialog.Copy}" Width="88" Margin="0,0,8,0" Click="Copy_Click" />
                 <ui:Button Content="{local:Loc Dialog.Saved}" Width="110" Appearance="Primary" IsDefault="True" Click="Ok_Click" />
             </StackPanel>

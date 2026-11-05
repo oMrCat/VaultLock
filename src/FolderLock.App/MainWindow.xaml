@@ -349,6 +349,8 @@
                                HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
                     <ui:Button Content="{local:Loc Detail.ViewRecovery}" Click="ViewRecovery_Click" Margin="0,8,0,0"
                                HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
+                    <ui:Button Content="{local:Loc Detail.SetHint}" Click="PasswordHint_Click" Margin="0,8,0,0"
+                               HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
                     <ui:Button Content="{local:Loc Detail.Remove}" Click="Remove_Click" Margin="0,8,0,0"
                                HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
                 </StackPanel>

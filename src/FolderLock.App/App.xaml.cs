@@ -31,8 +31,7 @@ public partial class App : Application
         _instance = new SingleInstance();
         if (!_instance.IsFirstInstance)
         {
-            var (verb, path) = FolderLock.App.MainWindow.ParseCommand(args);
-            if (verb is not null && path is not null)
+            foreach (var (verb, path) in FolderLock.App.MainWindow.ParseCommands(args))
             {
                 SingleInstance.Forward(verb, path);
             }

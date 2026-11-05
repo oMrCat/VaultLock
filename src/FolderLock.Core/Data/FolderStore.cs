@@ -1,3 +1,4 @@
+using FolderLock.Core.Security;
 using Microsoft.Data.Sqlite;
 
 namespace FolderLock.Core.Data;
@@ -8,7 +9,8 @@ public sealed class FolderStore
         """
         Id, Path, DisplayName, PasswordHash, IsLocked, DaclSddl,
         AccessRulesProtected, EncryptionMode, RecoveryHash, CreatedAt, LastLockedAt,
-        ProtectedRecoveryCode, VaultPath, FailedAttempts, LockoutUntil, OwnerSid, OriginalAttributes
+        ProtectedRecoveryCode, VaultPath, FailedAttempts, LockoutUntil, OwnerSid, OriginalAttributes,
+        PasswordHintProtected, RecoveryBackedUpAt
         """;
 
     private readonly string _connectionString;
@@ -73,6 +75,8 @@ public sealed class FolderStore
         EnsureColumn(connection, "LockoutUntil", "TEXT NULL");
         EnsureColumn(connection, "OwnerSid", "TEXT NULL");
         EnsureColumn(connection, "OriginalAttributes", "INTEGER NULL");
+        EnsureColumn(connection, "PasswordHintProtected", "TEXT NULL");
+        EnsureColumn(connection, "RecoveryBackedUpAt", "TEXT NULL");
     }
 
     private static void CreateSchema(SqliteConnection connection)
@@ -97,7 +101,24 @@ public sealed class FolderStore
                     FailedAttempts INTEGER NOT NULL DEFAULT 0,
                     LockoutUntil TEXT NULL,
                     OwnerSid TEXT NULL,
-                    OriginalAttributes INTEGER NULL
+                    OriginalAttributes INTEGER NULL,
+                    PasswordHintProtected TEXT NULL,
+                    RecoveryBackedUpAt TEXT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS VaultKeySlots (
+                    SlotId TEXT PRIMARY KEY,
+                    FolderId INTEGER NOT NULL,
+                    Kind INTEGER NOT NULL,
+                    Label TEXT NULL,
+                    ProtectedSecret TEXT NULL,
+                    CreatedAt TEXT NOT NULL,
+                    LastRevealedAt TEXT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS LocalUnlockKeys (
+                    FolderId INTEGER PRIMARY KEY,
+                    ProtectedKey TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS AuditLog (
@@ -222,11 +243,13 @@ public sealed class FolderStore
             INSERT INTO Folders
                 (Path, DisplayName, PasswordHash, IsLocked, DaclSddl,
                  AccessRulesProtected, EncryptionMode, RecoveryHash, CreatedAt, LastLockedAt,
-                 ProtectedRecoveryCode, VaultPath, FailedAttempts, LockoutUntil, OwnerSid, OriginalAttributes)
+                 ProtectedRecoveryCode, VaultPath, FailedAttempts, LockoutUntil, OwnerSid, OriginalAttributes,
+                 PasswordHintProtected, RecoveryBackedUpAt)
             VALUES
                 ($path, $displayName, $passwordHash, $isLocked, $daclSddl,
                  $accessRulesProtected, $encryptionMode, $recoveryHash, $createdAt, $lastLockedAt,
-                 $protectedRecoveryCode, $vaultPath, $failedAttempts, $lockoutUntil, $ownerSid, $originalAttributes);
+                 $protectedRecoveryCode, $vaultPath, $failedAttempts, $lockoutUntil, $ownerSid, $originalAttributes,
+                 $passwordHintProtected, $recoveryBackedUpAt);
             SELECT last_insert_rowid();
             """;
         AddRecordParameters(command, record);
@@ -259,7 +282,9 @@ public sealed class FolderStore
                 FailedAttempts = $failedAttempts,
                 LockoutUntil = $lockoutUntil,
                 OwnerSid = $ownerSid,
-                OriginalAttributes = $originalAttributes
+                OriginalAttributes = $originalAttributes,
+                PasswordHintProtected = $passwordHintProtected,
+                RecoveryBackedUpAt = $recoveryBackedUpAt
             WHERE Id = $id;
             """;
         AddRecordParameters(command, record);
@@ -271,8 +296,141 @@ public sealed class FolderStore
     {
         using var connection = OpenConnection();
         using var command = connection.CreateCommand();
-        command.CommandText = "DELETE FROM Folders WHERE Id = $id;";
+        command.CommandText =
+            """
+            DELETE FROM Folders WHERE Id = $id;
+            DELETE FROM VaultKeySlots WHERE FolderId = $id;
+            DELETE FROM LocalUnlockKeys WHERE FolderId = $id;
+            """;
         command.Parameters.AddWithValue("$id", id);
+        command.ExecuteNonQuery();
+    }
+
+    public void ReplaceVaultKeySlots(long folderId, IEnumerable<VaultKeySlotRecord> slots)
+    {
+        ArgumentNullException.ThrowIfNull(slots);
+
+        using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction();
+
+        using (var delete = connection.CreateCommand())
+        {
+            delete.Transaction = transaction;
+            delete.CommandText = "DELETE FROM VaultKeySlots WHERE FolderId = $folderId;";
+            delete.Parameters.AddWithValue("$folderId", folderId);
+            delete.ExecuteNonQuery();
+        }
+
+        foreach (var slot in slots)
+        {
+            using var insert = connection.CreateCommand();
+            insert.Transaction = transaction;
+            insert.CommandText =
+                """
+                INSERT INTO VaultKeySlots
+                    (SlotId, FolderId, Kind, Label, ProtectedSecret, CreatedAt, LastRevealedAt)
+                VALUES
+                    ($slotId, $folderId, $kind, $label, $protectedSecret, $createdAt, $lastRevealedAt);
+                """;
+            insert.Parameters.AddWithValue("$slotId", slot.SlotId.ToString("D"));
+            insert.Parameters.AddWithValue("$folderId", folderId);
+            insert.Parameters.AddWithValue("$kind", (int)slot.Kind);
+            insert.Parameters.AddWithValue("$label", (object?)slot.Label ?? DBNull.Value);
+            insert.Parameters.AddWithValue("$protectedSecret", (object?)slot.ProtectedSecret ?? DBNull.Value);
+            insert.Parameters.AddWithValue("$createdAt", slot.CreatedAt.UtcDateTime.ToString("O"));
+            insert.Parameters.AddWithValue(
+                "$lastRevealedAt",
+                slot.LastRevealedAt is { } revealed ? revealed.UtcDateTime.ToString("O") : DBNull.Value);
+            insert.ExecuteNonQuery();
+        }
+
+        transaction.Commit();
+    }
+
+    public IReadOnlyList<VaultKeySlotRecord> GetVaultKeySlots(long folderId)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT SlotId, FolderId, Kind, Label, ProtectedSecret, CreatedAt, LastRevealedAt
+            FROM VaultKeySlots
+            WHERE FolderId = $folderId
+            ORDER BY CreatedAt;
+            """;
+        command.Parameters.AddWithValue("$folderId", folderId);
+
+        var results = new List<VaultKeySlotRecord>();
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            results.Add(new VaultKeySlotRecord
+            {
+                SlotId = Guid.Parse(reader.GetString(0)),
+                FolderId = reader.GetInt64(1),
+                Kind = (VaultSlotKind)reader.GetInt32(2),
+                Label = reader.IsDBNull(3) ? null : reader.GetString(3),
+                ProtectedSecret = reader.IsDBNull(4) ? null : reader.GetString(4),
+                CreatedAt = DateTimeOffset.Parse(
+                    reader.GetString(5),
+                    null,
+                    System.Globalization.DateTimeStyles.RoundtripKind),
+                LastRevealedAt = reader.IsDBNull(6)
+                    ? null
+                    : DateTimeOffset.Parse(
+                        reader.GetString(6),
+                        null,
+                        System.Globalization.DateTimeStyles.RoundtripKind),
+            });
+        }
+
+        return results;
+    }
+
+    public void MarkVaultKeySlotRevealed(Guid slotId, DateTimeOffset revealedAt)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "UPDATE VaultKeySlots SET LastRevealedAt = $revealedAt WHERE SlotId = $slotId;";
+        command.Parameters.AddWithValue("$slotId", slotId.ToString("D"));
+        command.Parameters.AddWithValue("$revealedAt", revealedAt.UtcDateTime.ToString("O"));
+        command.ExecuteNonQuery();
+    }
+
+    public string? GetLocalUnlockKey(long folderId)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT ProtectedKey FROM LocalUnlockKeys WHERE FolderId = $folderId;";
+        command.Parameters.AddWithValue("$folderId", folderId);
+        var value = command.ExecuteScalar();
+        return value is null or DBNull ? null : value.ToString();
+    }
+
+    public void SaveLocalUnlockKey(long folderId, string protectedKey)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(protectedKey);
+
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            INSERT INTO LocalUnlockKeys (FolderId, ProtectedKey)
+            VALUES ($folderId, $protectedKey)
+            ON CONFLICT(FolderId) DO UPDATE SET ProtectedKey = excluded.ProtectedKey;
+            """;
+        command.Parameters.AddWithValue("$folderId", folderId);
+        command.Parameters.AddWithValue("$protectedKey", protectedKey);
+        command.ExecuteNonQuery();
+    }
+
+    public void DeleteLocalUnlockKey(long folderId)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM LocalUnlockKeys WHERE FolderId = $folderId;";
+        command.Parameters.AddWithValue("$folderId", folderId);
         command.ExecuteNonQuery();
     }
 
@@ -329,7 +487,7 @@ public sealed class FolderStore
         var plainPath = _databasePath + ".plain";
         File.Move(_databasePath, plainPath, overwrite: true);
 
-        var tables = new[] { "Folders", "AuditLog" };
+        var tables = new[] { "Folders", "AuditLog", "VaultKeySlots", "LocalUnlockKeys" };
         try
         {
             using (var source = new SqliteConnection(
@@ -500,6 +658,12 @@ public sealed class FolderStore
         command.Parameters.AddWithValue(
             "$originalAttributes",
             record.OriginalAttributes is { } attributes ? (long)attributes : DBNull.Value);
+        command.Parameters.AddWithValue(
+            "$passwordHintProtected",
+            (object?)record.PasswordHintProtected ?? DBNull.Value);
+        command.Parameters.AddWithValue(
+            "$recoveryBackedUpAt",
+            record.RecoveryBackedUpAt is { } backedUp ? backedUp.UtcDateTime.ToString("O") : DBNull.Value);
     }
 
     private static FolderRecord ReadRecord(SqliteDataReader reader)
@@ -527,6 +691,10 @@ public sealed class FolderStore
                 : DateTimeOffset.Parse(reader.GetString(14), null, System.Globalization.DateTimeStyles.RoundtripKind),
             OwnerSid = reader.IsDBNull(15) ? null : reader.GetString(15),
             OriginalAttributes = reader.IsDBNull(16) ? null : (uint)reader.GetInt64(16),
+            PasswordHintProtected = reader.IsDBNull(17) ? null : reader.GetString(17),
+            RecoveryBackedUpAt = reader.IsDBNull(18)
+                ? null
+                : DateTimeOffset.Parse(reader.GetString(18), null, System.Globalization.DateTimeStyles.RoundtripKind),
         };
     }
 }
