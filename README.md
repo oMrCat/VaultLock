@@ -30,12 +30,15 @@ behind a clean Fluent (Windows 11 style) UI.
   refuses with an explicit message instead of creating a one-way lock. Instant,
   no data movement.
 - **AES-256-GCM vault (optional)** — encrypts the whole folder into a single
-  `.flvault` container with an envelope scheme (random DEK wrapped by the
-  password and by a recovery code). Protects against admin access and offline
-  copying. New containers use format **v2** (authenticated header and
-  authenticated end block, so metadata tampering and truncation are detected);
-  **v1** containers stay readable but are never written and are **not migrated
-  automatically**. Optional GZip compression before encryption.
+  `.flvault` container with an envelope scheme (random DEK wrapped by **1–8 key
+  slots**: password, recovery code, optional emergency password, and local
+  auto-unlock via DPAPI). Protects against admin access and offline copying.
+  New containers use format **v3** (A/B header blocks plus an authenticated end
+  block, so a damaged header cannot make the whole container unreadable, and
+  metadata tampering and truncation are detected); **v2** containers are
+  read-only and can be upgraded in place to v3 (the original file is kept as
+  `.bak`); **v1** containers are read-only. Optional GZip compression before
+  encryption.
 - **Dangerous-path guard** — refuses to lock drive roots, `Windows`,
   `System32`, `Program Files*`, `ProgramData`, profile roots, Desktop,
   Documents, etc.
@@ -45,7 +48,18 @@ behind a clean Fluent (Windows 11 style) UI.
 - Passwords stored as `PBKDF2-HMAC-SHA256`, 210,000 iterations, random salt,
   constant-time comparison. Never stored in plaintext.
 - **Recovery code** (Crockford Base32) to unlock an encrypted vault if the
-  password is forgotten; protected locally with Windows DPAPI and exportable.
+  password is forgotten; protected locally with Windows DPAPI, printable from
+  the dialog, and the clipboard is cleared after copying. It can be viewed
+  again without the password for **7 days** after creation or last viewing;
+  after that the main password is required. If it has not been confirmed as
+  backed up for **30 days**, the status bar shows a reminder.
+- **Multi-channel recovery** — besides the password, the recovery code, the
+  emergency password and local auto-unlock (DPAPI) can each unlock independently;
+  the **Forgot password** wizard tries every available channel and reports
+  **channel missing / wrong key / success**.
+- **Password hint** — DPAPI-protected and stored only in the local database,
+  never written into the `.flvault` container; shown in the unlock prompt on the
+  same Windows account/machine.
 - **Memory hygiene** — passwords/recovery codes are held in a zeroing `Secret`
   buffer and clipboard is cleared after use.
 - **Failed-attempt throttling** — escalating lockouts after repeated wrong
@@ -91,7 +105,10 @@ behind a clean Fluent (Windows 11 style) UI.
   search, sortable list, detail pane and an empty state.
 - Password strength meter and generator.
 - **English / 简体中文** UI.
-- Right-click Explorer integration and single-instance command forwarding.
+- Explorer right-click cascade menus written to HKCU by default, with
+  multi-selection: folders get lock / unlock / add to list / remove from list /
+  open, `.flvault` files get verify / decrypt / salvage / open. Single-instance
+  command forwarding.
 
 ---
 
@@ -182,9 +199,10 @@ Or use *Tools → Install guard service* in the app.
 dotnet test
 ```
 
-202 unit tests cover password hashing, the ACL locker (against real temporary
-folders, including the `WRITE_DAC` pre-check), vault round-trips/corruption
-(v1 read compatibility and v2 authentication), purge, trace cleaning,
+238 unit tests cover password hashing, the ACL locker (against real temporary
+folders, including the `WRITE_DAC` pre-check and OI|CI inheritance behaviour),
+vault round-trips/corruption (v1 read compatibility, v2 in-place upgrade and v3
+authentication), purge, trace cleaning,
 throttling, audit, SQLCipher encryption and migration, updater versioning,
 HTTPS/hash/signature validation, and overlay logic.
 
@@ -199,8 +217,9 @@ HTTPS/hash/signature validation, and overlay logic.
   but ownership is not silently reverted.
 - **AES vault** protects against offline access and admins, but not against
   malware running as you while unlocked, and not against a cold-boot attacker.
-  Only v2 containers authenticate their metadata; v1 containers are legacy
-  read-only and are not upgraded in place.
+  Only v3 containers authenticate their metadata and detect truncation; legacy
+  v2 containers are read-only but can be upgraded in place to v3, and v1
+  containers are read-only.
 - **Guard service signature checks** default to warn mode: a replaced
   `FolderLock.Service.exe` is logged but still runs. Set
   `FOLDERLOCK_REQUIRE_SIGNATURE=1` with a trusted signing certificate to get
@@ -208,8 +227,9 @@ HTTPS/hash/signature validation, and overlay logic.
 - Secure deletion is best-effort: on SSDs, TRIM/wear-levelling, the page file,
   and the Windows Search index may retain copies. Use full-disk encryption for
   strong guarantees.
-- Forgetting an encrypted folder's password means only the recovery code can
-  restore it — keep it safe.
+- If you forget an encrypted folder's password, only another recovery channel
+  can restore it — the recovery code, the emergency password, or local
+  auto-unlock on the same machine. Keep the recovery code safe.
 
 ---
 

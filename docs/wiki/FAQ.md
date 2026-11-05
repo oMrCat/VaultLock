@@ -6,10 +6,14 @@ but an administrator can take ownership, and Safe Mode or another OS bypasses it
 entirely. For real protection use **AES encryption**.
 
 ### What happens if I forget the password?
-For an **encrypted** folder, use the **recovery code** you saved. There is no
-other way to recover it. For an **ACL-locked** folder, Unlock re-applies the
-saved DACL; if ownership was taken over, recover manually with `takeown` +
-`icacls`.
+For an **encrypted** folder, use the **Forgot password** wizard: besides the
+password, the recovery code, the optional emergency password and local
+auto-unlock (DPAPI) on the same machine each open the vault independently. The
+wizard reports **channel missing / wrong key / success** for every channel, and
+after one succeeds you set a new password without re-encrypting the data. There
+is no other way to recover an encrypted vault. For an **ACL-locked** folder,
+Unlock re-applies the saved DACL; if ownership was taken over, recover manually
+with `takeown` + `icacls`.
 
 ### Where is my data stored?
 - Database, key, settings: `%APPDATA%\FolderLock\` (or `<app>\data\` in portable

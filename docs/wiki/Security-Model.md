@@ -19,14 +19,18 @@
 ### AES-256-GCM vault (optional)
 - Encrypts the whole folder into a single `.flvault` file, then securely deletes
   the source.
-- Envelope scheme: a random data-encryption key (DEK) is wrapped twice — by the
-  password and by the recovery code — so either can unlock.
+- Envelope scheme: a random data-encryption key (DEK) is wrapped by **1–8 key
+  slots** — password, recovery code, optional emergency password, and local
+  auto-unlock (Windows DPAPI) — so any one of those channels unlocks the vault
+  independently.
 - Each 64 KiB chunk is separately AES-256-GCM authenticated; chunks are bound to
   their order via AAD.
-- New containers use format **v2**, with an authenticated header (HMAC-SHA256
-  keyed by the DEK) and an authenticated end block, so metadata tampering and
-  truncation are detected. Legacy **v1** containers are readable but read-only
-  and are **not migrated automatically**.
+- New containers use format **v3**, with an A/B header pair and an authenticated
+  end block, so metadata tampering and truncation are detected and a damaged
+  header block does not make the whole container unreadable. Legacy **v2**
+  containers are readable but read-only and can be upgraded in place to v3 (the
+  original file is kept as `.bak`); legacy **v1** containers are read-only and
+  are **not migrated automatically**.
 - **Protects against:** offline access, copying the disk, and administrators.
 - **Does not protect against:** malware running as you while the folder is
   unlocked, or a cold-boot/evil-maid attacker.
@@ -42,7 +46,27 @@
 
 - Crockford Base32, 160-bit. Wrapped locally with Windows DPAPI.
 - Lets you unlock an encrypted vault if the password is forgotten. Keep it
-  somewhere safe and offline.
+  somewhere safe and offline. The dialog can print it and clears the clipboard
+  after copying; it can be viewed again without the password for **7 days** after
+  creation or last reveal, and if it has not been confirmed as backed up for
+  **30 days** the status bar shows a reminder.
+
+## Multi-channel recovery
+
+- Every v3 vault carries up to eight key slots, so the password, the recovery
+  code, the optional emergency password and local auto-unlock (DPAPI) each
+  unlock the vault independently — there is no single point of failure among
+  them.
+- The **Forgot password** wizard tries the available channels one by one and
+  reports **channel missing / wrong key / success**. After success you set a new
+  password; the data itself is not re-encrypted.
+
+## Password hints
+
+A password hint is encrypted with DPAPI and stored only in the local database;
+it is never written into the `.flvault` container. It is shown in the unlock
+prompt only on the same Windows account/machine, and it carries no
+authentication value — it is a memory aid, not a credential.
 
 ## Failed-attempt throttling
 

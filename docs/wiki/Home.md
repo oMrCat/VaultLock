@@ -2,8 +2,9 @@
 
 **VaultLock** is a modern Windows app to password-protect folders. It offers fast
 NTFS **ACL locks** and optional real **AES-256-GCM encrypted vaults**, plus
-secure deletion, trace cleaning, auto-lock, recovery codes and a background
-guard service, in a clean Fluent (Windows 11 style) UI. English and 简体中文.
+secure deletion, trace cleaning, auto-lock, recovery codes, multi-channel
+recovery and a background guard service, in a clean Fluent (Windows 11 style)
+UI. English and 简体中文.
 
 > Repo: <https://github.com/oMrCat/VaultLock>
 > Product **VaultLock**, internal solution/namespace `FolderLock`.

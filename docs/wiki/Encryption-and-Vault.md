@@ -14,11 +14,28 @@ container back to the original path and deletes the container.
 
 ## Container format
 
-New containers are written in **format v2**:
+New containers are written in **format v3**:
+
+- The header is duplicated into two independent blocks (**A/B**), each carrying
+  the same information. Either block is enough to open the container, so a
+  damaged header write cannot make the whole file unreadable.
+- The envelope wraps one data key with **1–8 key slots**. Each slot wraps the
+  same DEK with a different secret: password, recovery code, optional emergency
+  password, and local auto-unlock (Windows DPAPI).
+- An authenticated end block records the chunk count and plaintext byte total,
+  so metadata tampering and truncation are detected.
+
+Legacy **v2** containers are read-only and can be upgraded in place to v3 (the
+original file is kept as `.bak`). Legacy **v1** containers are read-only.
+
+### v2 legacy layout
+
+The byte layout below describes legacy **v2** containers and is kept for
+reference:
 
 ```
 magic "FLVLT1" (6 bytes)
-version u8         (2 = current, 1 = legacy, read-only)
+version u8         (2 = legacy v2, 1 = legacy v1, both read-only)
 flags u8           (bit0 = has recovery code, bit1 = payload is gzip-compressed)
 iterations i32 LE
 saltPassword  (16)
@@ -44,17 +61,19 @@ end block:
 - Each payload chunk is AES-256-GCM with the DEK; the chunk index is used as AAD
   to prevent reordering.
 - The 32-byte header MAC (keyed by the DEK) covers the flags and KDF parameters,
-  so metadata tampering is detected. Only v2 containers have it.
+  so metadata tampering is detected. Only v2 containers have this single header
+  MAC; v3 replaces it with the A/B header blocks and per-slot wrapping described
+  above.
 - The authenticated end block records the chunk count and plaintext byte total;
   a missing or mismatched end block means the container was truncated or tampered
-  with. Only v2 containers have it.
+  with. v2 and v3 containers have it.
 - The payload is a simple stream of entries (type, relative path, timestamp,
   size, content). Relative paths are validated to prevent traversal.
 
 **Legacy v1** containers have no header MAC and end with a 4-byte zero length
 instead of the authenticated end block. They remain readable, are never written
 any more, and are **not migrated automatically**; header authentication and
-truncation detection apply to v2 only.
+truncation detection apply to v2 and v3 only.
 
 ## Compression
 
