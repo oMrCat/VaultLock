@@ -190,31 +190,31 @@ public sealed class VaultSlotManager
             case VaultSlotKind.Password:
             case VaultSlotKind.RecoveryCode:
             case VaultSlotKind.EmergencyPassword:
-            {
-                if (spec.Secret is null || spec.Secret.IsEmpty)
                 {
-                    throw new VaultException("密码类密钥槽必须提供秘密。");
-                }
+                    if (spec.Secret is null || spec.Secret.IsEmpty)
+                    {
+                        throw new VaultException("密码类密钥槽必须提供秘密。");
+                    }
 
-                var iterations = currentIterations is > 0 and <= VaultKeySlot.MaxIterations
-                    ? currentIterations
-                    : PasswordHasher.DefaultIterations;
-                return VaultKeySlot.CreateForSecret(spec.Kind, spec.Secret.Span, dek, iterations, id);
-            }
+                    var iterations = currentIterations is > 0 and <= VaultKeySlot.MaxIterations
+                        ? currentIterations
+                        : PasswordHasher.DefaultIterations;
+                    return VaultKeySlot.CreateForSecret(spec.Kind, spec.Secret.Span, dek, iterations, id);
+                }
 
             case VaultSlotKind.DpapiUser:
-            {
-                if (spec.MachineKey is null)
                 {
-                    throw new VaultException("本机自动解锁槽必须提供机器密钥。");
-                }
+                    if (spec.MachineKey is null)
+                    {
+                        throw new VaultException("本机自动解锁槽必须提供机器密钥。");
+                    }
 
-                return VaultKeySlot.CreateForMachineKey(
-                    VaultSlotKind.DpapiUser,
-                    spec.MachineKey,
-                    dek,
-                    id);
-            }
+                    return VaultKeySlot.CreateForMachineKey(
+                        VaultSlotKind.DpapiUser,
+                        spec.MachineKey,
+                        dek,
+                        id);
+                }
 
             default:
                 throw new VaultException($"当前版本暂不支持该密钥槽类型：{spec.Kind}。");

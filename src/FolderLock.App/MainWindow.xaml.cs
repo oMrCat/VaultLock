@@ -503,7 +503,7 @@ public partial class MainWindow : FluentWindow
                 folderId is null
                     ? null
                     : () => AppServices.Folders.MarkRecoveryCodeBackedUp(folderId.Value))
-            { Owner = this }
+        { Owner = this }
             .ShowDialog();
     }
 
@@ -678,7 +678,7 @@ public partial class MainWindow : FluentWindow
                 prompt,
                 showForgotPassword: item.IsEncrypted,
                 hint: hint)
-            { Owner = this };
+        { Owner = this };
         if (dialog.ShowDialog() != true)
         {
             return false;
@@ -1261,7 +1261,7 @@ public partial class MainWindow : FluentWindow
                 $"输入“{record.DisplayName}”的密码以解锁：",
                 showForgotPassword: record.EncryptionMode != FolderLock.Core.Data.EncryptionMode.None,
                 hint: AppServices.Folders.GetPasswordHint(record.Id))
-            { Owner = this };
+        { Owner = this };
         if (dialog.ShowDialog() != true)
         {
             return;
