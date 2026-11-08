@@ -66,7 +66,7 @@ internal static class Program
         var vault = Path.Combine(Dir("01-out"), "vault.flvault");
         Vault.EncryptDirectory(src, vault, Password, "RECOVERY-CODE", compress: false, overwrite: true);
         var info = Vault.ReadHeaderInfo(vault);
-        Assert("01a 头部版本=2", info.Version == 2, $"version={info.Version}");
+        Assert("01a 头部版本=3", info.Version == VaultHeaderV3.FormatVersion, $"version={info.Version}");
         Assert("01b 头部记录未压缩", !info.IsCompressed, "IsCompressed=true");
 
         var target = Path.Combine(Dir("01-restored"), "tree");
@@ -779,7 +779,10 @@ internal static class Program
     {
         var result = new List<string>();
         var bytes = File.ReadAllBytes(vaultPath);
-        var pos = V2HeaderSize;
+        // v3 容器头部 4096 字节；v2 及更早为 196。版本号位于偏移 6。
+        var pos = bytes.Length > 6 && bytes[6] == VaultHeaderV3.FormatVersion
+            ? VaultHeaderV3.HeaderSize
+            : V2HeaderSize;
         while (pos + 4 <= bytes.Length)
         {
             var length = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(pos, 4));
