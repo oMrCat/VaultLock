@@ -100,15 +100,29 @@ public partial class App : Application
                     ShellIntegration.Uninstall();
                     return true;
                 case "--install-service":
-                    ServiceRegistration.InstallDirect();
+                    TryServiceCommand(() => ServiceRegistration.InstallDirect());
                     return true;
                 case "--uninstall-service":
-                    ServiceRegistration.UninstallDirect();
+                    TryServiceCommand(() => ServiceRegistration.UninstallDirect());
                     return true;
             }
         }
 
         return false;
+    }
+
+    /// <summary>CLI 服务命令：失败（如 UAC 被取消、未找到服务 exe）时给出明确退出码而不是静默/崩溃。</summary>
+    private static void TryServiceCommand(Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            Environment.ExitCode = 1;
+        }
     }
 
     private static void DispatchCommand(MainWindow window, string payload)

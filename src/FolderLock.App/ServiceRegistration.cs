@@ -36,13 +36,38 @@ public static class ServiceRegistration
 
     public static void UninstallElevated() => RunElevated(BuildUninstallScript(ServiceName));
 
-    public static void InstallDirect() => RunDirect(BuildInstallScript(ServiceName));
+    public static void InstallDirect()
+    {
+        if (!TryRunDirect(BuildInstallScript(ServiceName)))
+        {
+            // 非管理员下 sc.exe 会在隐藏窗口里静默失败——回退 UAC 提权重试
+            InstallElevated();
+        }
+    }
 
-    public static void UninstallDirect() => RunDirect(BuildUninstallScript(ServiceName));
+    public static void UninstallDirect()
+    {
+        if (!TryRunDirect(BuildUninstallScript(ServiceName)))
+        {
+            UninstallElevated();
+        }
+    }
 
-    public static void InstallDirect(string serviceName) => RunDirect(BuildInstallScript(serviceName));
+    public static void InstallDirect(string serviceName)
+    {
+        if (!TryRunDirect(BuildInstallScript(serviceName)))
+        {
+            RunElevated(BuildInstallScript(serviceName));
+        }
+    }
 
-    public static void UninstallDirect(string serviceName) => RunDirect(BuildUninstallScript(serviceName));
+    public static void UninstallDirect(string serviceName)
+    {
+        if (!TryRunDirect(BuildUninstallScript(serviceName)))
+        {
+            RunElevated(BuildUninstallScript(serviceName));
+        }
+    }
 
     private static string BuildInstallScript(string serviceName)
     {
@@ -65,7 +90,7 @@ public static class ServiceRegistration
         sc.exe delete "{serviceName}"
         """;
 
-    private static void RunDirect(string script)
+    private static bool TryRunDirect(string script)
     {
         var temp = WriteScript(script);
         try
@@ -80,6 +105,9 @@ public static class ServiceRegistration
             });
 
             process?.WaitForExit();
+            // 直连安装/卸载的成败以服务注册状态为准（脚本退出码 + 注册表），
+            // 非管理员时 sc.exe 的 Access Denied 不会体现在退出码上
+            return process?.ExitCode == 0 && IsInstalled();
         }
         finally
         {
