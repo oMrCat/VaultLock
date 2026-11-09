@@ -22,3 +22,6 @@ db.key
 # OS
 Thumbs.db
 desktop.ini
+
+# 本地一次性 E2E 工具（结果已记录于 PROJECT-HANDOFF）
+_e2e/
