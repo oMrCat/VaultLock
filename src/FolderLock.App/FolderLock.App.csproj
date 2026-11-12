@@ -17,6 +17,7 @@
   <PropertyGroup>
     <FolderLockHello Condition="'$(FolderLockHello)' == ''">true</FolderLockHello>
     <OutputType>WinExe</OutputType>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <TargetFramework Condition="'$(FolderLockHello)' == 'true'">net8.0-windows10.0.19041.0</TargetFramework>
     <TargetFramework Condition="'$(FolderLockHello)' != 'true'">net8.0-windows</TargetFramework>
     <DefineConstants Condition="'$(FolderLockHello)' != 'true'">$(DefineConstants);FOLDERLOCK_NO_HELLO</DefineConstants>

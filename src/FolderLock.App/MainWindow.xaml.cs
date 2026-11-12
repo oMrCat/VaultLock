@@ -48,7 +48,11 @@ public partial class MainWindow : FluentWindow
         _watchdog.Start();
 
         _autoLock = new AutoLockManager(this);
-        Loaded += (_, _) => ReportPendingUpdateFailure();
+        Loaded += (_, _) =>
+        {
+            ReportPendingUpdateFailure();
+            WarnIfElevated();
+        };
         SourceInitialized += (_, _) =>
         {
             var handle = new WindowInteropHelper(this).Handle;
@@ -56,12 +60,34 @@ public partial class MainWindow : FluentWindow
         };
     }
 
+    /// <summary>
+    /// 提权（管理员）运行时，Windows UIPI 会静默阻止资源管理器向本窗口拖拽。
+    /// 用户无从得知原因，启动时主动提示。
+    /// </summary>
+    private void WarnIfElevated()
+    {
+        try
+        {
+            using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+            var principal = new System.Security.Principal.WindowsPrincipal(identity);
+            if (principal.IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator))
+            {
+                ShowInfo("当前以管理员身份运行：Windows 将阻止从资源管理器拖拽文件夹到本窗口，请以普通方式启动后再使用拖拽。");
+            }
+        }
+        catch
+        {
+            // 提权检测失败不影响主流程
+        }
+    }
+
     public void LockAllUnlocked(string reason) => _ = LockAllUnlockedAsync(reason);
 
     public async Task<bool> LockAllUnlockedAsync(string reason)
     {
-        var locked = await Task.Run(() => AppServices.Folders.LockAll(AppServices.Keyring));
-        if (locked.Count == 0)
+        var failedList = new List<string>();
+        var locked = await Task.Run(() => AppServices.Folders.LockAll(AppServices.Keyring, out failedList));
+        if (locked.Count == 0 && failedList.Count == 0)
         {
             return false;
         }
@@ -69,19 +95,26 @@ public partial class MainWindow : FluentWindow
         Reload();
         UpdateStatus($"已自动锁定 {locked.Count} 个文件夹（{reason}）。");
         Tray?.ShowBalloon("FolderLock", $"{reason}：已自动锁定 {locked.Count} 个文件夹。");
-        return true;
+        if (failedList.Count > 0)
+        {
+            // 空闲/锁屏锁定此前完全静默吞掉失败项，用户会误以为已全部锁上。
+            UpdateStatus($"已自动锁定 {locked.Count} 个文件夹（{reason}），{failedList.Count} 个失败：{string.Join("；", failedList.Take(3))}");
+            Tray?.ShowBalloon("FolderLock", $"{reason}：{failedList.Count} 个文件夹自动锁定失败，请打开主窗口查看。");
+        }
+
+        return locked.Count > 0;
     }
 
     public void LockFolderSilently(long id, string reason) => _ = LockFolderSilentlyAsync(id, reason);
 
-    public async Task LockFolderSilentlyAsync(long id, string reason)
+    public async Task<RelockOutcome> LockFolderSilentlyAsync(long id, string reason)
     {
         // 未缓存密码时无法自动重锁：必须明确提示，不能静默失败。
         if (!AppServices.Keyring.TryGet(id, out var secret))
         {
             UpdateStatus($"未缓存密码，无法自动重新锁定（{reason}），请手动锁定。");
             Tray?.ShowBalloon("FolderLock", $"未缓存密码，无法自动重新锁定（{reason}），请手动锁定。");
-            return;
+            return RelockOutcome.GaveUp;
         }
 
         try
@@ -95,12 +128,20 @@ public partial class MainWindow : FluentWindow
             Reload(id);
             UpdateStatus($"已自动重新锁定（{reason}）。");
             Tray?.ShowBalloon("FolderLock", "临时解锁到期，已重新锁定。");
+            return RelockOutcome.Locked;
         }
         catch (Exception ex)
         {
+            // 气泡由 AutoLockManager 统一节流（仅首次与放弃时提示），这里只更新状态栏
             UpdateStatus($"自动重新锁定失败：{ex.Message}");
-            Tray?.ShowBalloon("FolderLock", $"自动重新锁定失败：{ex.Message}");
+            return RelockOutcome.RetryableFailure;
         }
+    }
+
+    /// <summary>供 AutoLockManager 在关键节点弹出托盘气泡（失败首告/放弃通知）。</summary>
+    public void ShowRelockBalloon(string message)
+    {
+        Tray?.ShowBalloon("FolderLock", message);
     }
 
     public void PanicLock()
@@ -943,7 +984,19 @@ public partial class MainWindow : FluentWindow
 
     private void FolderList_DragOver(object sender, DragEventArgs e)
     {
-        e.Effects = e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None;
+        // 仅当拖入内容中存在文件夹时才显示可放置光标；
+        // 提权（管理员）运行时 UIPI 会静默阻止 Explorer 拖拽，这里天然收不到事件。
+        if (e.Data.GetDataPresent(DataFormats.FileDrop)
+            && e.Data.GetData(DataFormats.FileDrop) is string[] paths
+            && paths.Any(path => Directory.Exists(path)))
+        {
+            e.Effects = DragDropEffects.Copy;
+        }
+        else
+        {
+            e.Effects = DragDropEffects.None;
+        }
+
         e.Handled = true;
     }
 
@@ -962,6 +1015,8 @@ public partial class MainWindow : FluentWindow
 
         if (folders.Count == 0)
         {
+            // 之前静默 return，用户拖入文件时毫无反馈，误以为拖拽功能不可用
+            UpdateStatus("仅支持拖入文件夹（拖入的是文件或无效路径）。");
             return;
         }
 
@@ -1484,7 +1539,9 @@ public partial class MainWindow : FluentWindow
         try
         {
             ShellIntegration.Install();
-            ShowInfo("已注册右键菜单。");
+            // Win11（Build 22000+）的现代右键菜单不显示 classic 注册项，
+            // 只出现在「显示更多选项」旧菜单里——不说明的话用户会以为注册失败。
+            ShowInfo("已注册右键菜单。Windows 11 请在右键菜单中选择「显示更多选项」（Shift+F10）查看 VaultLock 项。");
         }
         catch (Exception ex)
         {

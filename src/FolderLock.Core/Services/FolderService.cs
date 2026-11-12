@@ -804,9 +804,19 @@ public sealed class FolderService
 
     public IReadOnlyList<long> LockAll(Keyring keyring)
     {
+        return LockAll(keyring, out _);
+    }
+
+    /// <summary>
+    /// 批量锁定所有已解锁且缓存了密码的文件夹。
+    /// 单项失败不再静默吞掉：失败明细通过 <paramref name="failures"/> 返回（供 UI 提示）。
+    /// </summary>
+    public IReadOnlyList<long> LockAll(Keyring keyring, out List<string> failures)
+    {
         ArgumentNullException.ThrowIfNull(keyring);
 
         var locked = new List<long>();
+        var failed = new List<string>();
         foreach (var record in _store.GetAll())
         {
             if (record.IsLocked || !keyring.TryGet(record.Id, out var secret))
@@ -820,11 +830,13 @@ public sealed class FolderService
                 keyring.Remove(record.Id);
                 locked.Add(record.Id);
             }
-            catch
+            catch (Exception ex)
             {
+                failed.Add($"{record.DisplayName}：{ex.Message}");
             }
         }
 
+        failures = failed;
         return locked;
     }
 
@@ -1158,6 +1170,23 @@ public sealed class FolderService
         var parent = Path.GetDirectoryName(record.Path)
                      ?? throw new FolderLockException("无法确定父目录。");
         var vaultPath = Path.Combine(parent, record.DisplayName + VaultEncryptor.Extension);
+
+        if (File.Exists(vaultPath))
+        {
+            // 正常流程里解锁时会删除容器；这里仍存在即上次删除失败的残留。
+            // 先尝试清理一次（避免锁死在"目标容器已存在，拒绝覆盖"的循环里）；
+            // 仍失败则给出可操作的指引，而不是笼统的"锁定失败"。
+            try
+            {
+                File.Delete(vaultPath);
+            }
+            catch (Exception ex)
+            {
+                throw new FolderLockException(
+                    $"存在残留加密容器 {vaultPath} 且无法删除（可能被占用）：{ex.Message}。请手动删除该文件后重试。",
+                    ex);
+            }
+        }
         var recoveryCode = record.ProtectedRecoveryCode is null
             ? null
             : SecretProtector.Unprotect(record.ProtectedRecoveryCode);

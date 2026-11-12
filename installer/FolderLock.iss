@@ -31,6 +31,7 @@ DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 OutputDir=..\artifacts
 OutputBaseFilename=FolderLock-Setup-{#AppVersion}
+SetupIconFile=../src/FolderLock.App/Assets/app.ico
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

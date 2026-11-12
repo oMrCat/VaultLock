@@ -5,6 +5,19 @@ using FolderLock.Core.Services;
 
 namespace FolderLock.App;
 
+/// <summary>自动重锁单次尝试的结果。</summary>
+public enum RelockOutcome
+{
+    /// <summary>已成功锁定。</summary>
+    Locked,
+
+    /// <summary>可重试的临时失败（文件占用、IO 冲突等）。</summary>
+    RetryableFailure,
+
+    /// <summary>永久性失败（如未缓存密码），重试无意义。</summary>
+    GaveUp,
+}
+
 public sealed class AutoLockManager : IDisposable
 {
     private const int NotifyForThisSession = 0;
@@ -20,10 +33,14 @@ public sealed class AutoLockManager : IDisposable
     private readonly MainWindow _window;
     private readonly DispatcherTimer _timer;
     private readonly Dictionary<long, DateTimeOffset> _unlockTimes = new();
+    private readonly Dictionary<long, int> _relockFailures = new();
     private readonly RelockGate _gate = new();
     private HwndSource? _source;
     private IntPtr _handle;
     private bool _hotkeyRegistered;
+
+    /// <summary>自动重锁连续失败的最大次数，超过后停止重试并明确告知用户。</summary>
+    private const int MaxRelockAttempts = 5;
 
     public AutoLockManager(MainWindow window)
     {
@@ -83,7 +100,11 @@ public sealed class AutoLockManager : IDisposable
         }
     }
 
-    public void NoteLocked(long id) => _unlockTimes.Remove(id);
+    public void NoteLocked(long id)
+    {
+        _unlockTimes.Remove(id);
+        _relockFailures.Remove(id);
+    }
 
     private void Tick()
     {
@@ -99,7 +120,9 @@ public sealed class AutoLockManager : IDisposable
                     continue;
                 }
 
-                _unlockTimes.Remove(id);
+                // 修复：此前在发起重锁前就把 id 移出 _unlockTimes，
+                // 重锁失败（如文件被占用、残留容器）后本解锁周期内永远不会再重试，
+                // 文件夹保持解锁状态。现在由 RelockAsync 按结果决定移除/重试。
                 _ = RelockAsync(id);
             }
         }
@@ -115,7 +138,38 @@ public sealed class AutoLockManager : IDisposable
     {
         try
         {
-            await _window.LockFolderSilentlyAsync(id, "临时解锁到期");
+            var outcome = await _window.LockFolderSilentlyAsync(id, "临时解锁到期");
+            switch (outcome)
+            {
+                case RelockOutcome.Locked:
+                    _unlockTimes.Remove(id);
+                    _relockFailures.Remove(id);
+                    break;
+                case RelockOutcome.GaveUp:
+                    // 永久性失败（如未缓存密码）：重试无意义，等待用户手动处理。
+                    _unlockTimes.Remove(id);
+                    _relockFailures.Remove(id);
+                    break;
+                case RelockOutcome.RetryableFailure:
+                    {
+                        // 常见于解锁期间文件被占用/杀软扫描句柄：下个 tick 自动重试。
+                        var fails = _relockFailures.GetValueOrDefault(id) + 1;
+                        _relockFailures[id] = fails;
+                        if (fails == 1)
+                        {
+                            _window.ShowRelockBalloon("自动重新锁定失败（文件夹可能仍被占用），将自动重试。");
+                        }
+                        else if (fails >= MaxRelockAttempts)
+                        {
+                            _unlockTimes.Remove(id);
+                            _relockFailures.Remove(id);
+                            _window.ShowRelockBalloon(
+                                $"自动重新锁定已连续失败 {fails} 次，已停止重试。请关闭占用该文件夹的程序后手动锁定。");
+                        }
+
+                        break;
+                    }
+            }
         }
         finally
         {

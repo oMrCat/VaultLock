@@ -94,10 +94,10 @@ public partial class App : Application
             switch (arg)
             {
                 case "--install-shell":
-                    ShellIntegration.Install();
+                    TryServiceCommand(() => ShellIntegration.Install());
                     return true;
                 case "--uninstall-shell":
-                    ShellIntegration.Uninstall();
+                    TryServiceCommand(() => ShellIntegration.Uninstall());
                     return true;
                 case "--install-service":
                     TryServiceCommand(() => ServiceRegistration.InstallDirect());

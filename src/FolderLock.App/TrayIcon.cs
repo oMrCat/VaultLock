@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.IO;
 using System.Windows;
 using Forms = System.Windows.Forms;
 
@@ -20,12 +21,39 @@ public sealed class TrayIcon : IDisposable
 
         _notifyIcon = new Forms.NotifyIcon
         {
-            Icon = SystemIcons.Shield,
+            // 用应用自身图标（ApplicationIcon 已嵌入 exe 资源），替代通用系统盾牌
+            Icon = LoadAppIcon(),
             Text = "FolderLock 文件夹加锁",
             Visible = true,
             ContextMenuStrip = menu,
         };
         _notifyIcon.DoubleClick += (_, _) => ShowWindow();
+    }
+
+    /// <summary>从 exe 提取应用图标；失败时回退系统盾牌图标。</summary>
+    private static Icon LoadAppIcon()
+    {
+        try
+        {
+            var exe = Environment.ProcessPath;
+            if (!string.IsNullOrEmpty(exe))
+            {
+                var full = Path.GetFullPath(exe);
+                if (File.Exists(full))
+                {
+                    var icon = Icon.ExtractAssociatedIcon(full);
+                    if (icon is not null)
+                    {
+                        return icon;
+                    }
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        return SystemIcons.Shield;
     }
 
     public void ShowMinimizedNotice()
