@@ -7,45 +7,41 @@ public sealed class ShellMenuSpecTests
     private const string Exe = @"C:\Program Files\VaultLock\FolderLock.App.exe";
 
     [Fact]
-    public void ForDirectory_BuildsCascadeWithExpectedCommands()
+    public void ForDirectory_BuildsTwoFlatEntries()
     {
-        var definition = ShellMenuSpec.ForDirectory(Exe, "zh");
+        var definitions = ShellMenuSpec.ForDirectory(Exe, "zh");
 
-        Assert.Equal(@"Directory\shell\VaultLock", definition.KeyPath);
-        Assert.Equal("VaultLock", definition.DisplayName);
-        Assert.Equal(Exe, definition.Icon);
-        Assert.Equal(
-            new[] { "01lock", "02unlock", "03add", "04remove", "05open" },
-            definition.Commands.Select(command => command.KeyName).ToArray());
-        Assert.Equal(
-            new[] { "加锁", "解锁", "加入保护列表", "移出保护列表", "在 VaultLock 中打开" },
-            definition.Commands.Select(command => command.Label).ToArray());
+        Assert.Equal(2, definitions.Count);
+        Assert.Equal(@"Directory\shell\VaultLock.Lock", definitions[0].KeyPath);
+        Assert.Equal(@"Directory\shell\VaultLock.Unlock", definitions[1].KeyPath);
+        Assert.All(definitions, definition => Assert.Equal(Exe, definition.Icon));
+        Assert.Equal("VaultLock：加锁", definitions[0].DisplayName);
+        Assert.Equal("VaultLock：解锁", definitions[1].DisplayName);
     }
 
     [Fact]
-    public void ForDirectory_ArgumentsUsePercentOneAndVerb()
+    public void ForDirectory_EachEntryIsFlatSingleCommand()
     {
-        var definition = ShellMenuSpec.ForDirectory(Exe, "zh");
+        var definitions = ShellMenuSpec.ForDirectory(Exe, "zh");
 
-        Assert.Equal("--lock \"%1\"", definition.Commands[0].Arguments);
-        Assert.Equal("--unlock \"%1\"", definition.Commands[1].Arguments);
-        Assert.Equal("--add \"%1\"", definition.Commands[2].Arguments);
-        Assert.Equal("--remove \"%1\"", definition.Commands[3].Arguments);
-        Assert.Equal("--open \"%1\"", definition.Commands[4].Arguments);
+        // 平铺项必须恰好一条命令（WriteDefinition 据此走平铺写法）
+        Assert.All(definitions, definition => Assert.Single(definition.Commands));
+        Assert.Equal("--lock \"%1\"", definitions[0].Commands[0].Arguments);
+        Assert.Equal("--unlock \"%1\"", definitions[1].Commands[0].Arguments);
+        Assert.All(
+            definitions.SelectMany(definition => definition.Commands),
+            command => Assert.Equal("Player", ShellMenuSpec.MultiSelectModel));
     }
 
     [Fact]
-    public void ForVaultFile_BuildsVerifyDecryptSalvageOpen()
+    public void ForVaultFile_BuildsSingleFlatOpenEntry()
     {
-        var definition = ShellMenuSpec.ForVaultFile(Exe, "zh");
+        var definitions = ShellMenuSpec.ForVaultFile(Exe, "zh");
 
-        Assert.Equal(@"SystemFileAssociations\.flvault\shell\VaultLock", definition.KeyPath);
-        Assert.Equal(
-            new[] { "01verify", "02decrypt", "03salvage", "04open" },
-            definition.Commands.Select(command => command.KeyName).ToArray());
-        Assert.Equal(
-            new[] { "验证容器", "解密到文件夹", "抢救容器", "在 VaultLock 中打开" },
-            definition.Commands.Select(command => command.Label).ToArray());
+        var definition = Assert.Single(definitions);
+        Assert.Equal(@"SystemFileAssociations\.flvault\shell\VaultLock.Open", definition.KeyPath);
+        Assert.Single(definition.Commands);
+        Assert.Equal("--open \"%1\"", definition.Commands[0].Arguments);
     }
 
     [Fact]
@@ -54,10 +50,9 @@ public sealed class ShellMenuSpecTests
         var directory = ShellMenuSpec.ForDirectory(Exe, "en");
         var vault = ShellMenuSpec.ForVaultFile(Exe, "en");
 
-        Assert.Equal("Lock", directory.Commands[0].Label);
-        Assert.Equal("Remove from protection list", directory.Commands[3].Label);
-        Assert.Equal("Verify vault", vault.Commands[0].Label);
-        Assert.Equal("Salvage vault", vault.Commands[2].Label);
+        Assert.Equal("VaultLock：Lock", directory[0].DisplayName);
+        Assert.Equal("Lock", directory[0].Commands[0].Label);
+        Assert.Equal("VaultLock：Open in VaultLock", vault[0].DisplayName);
     }
 
     [Fact]
@@ -74,9 +69,11 @@ public sealed class ShellMenuSpecTests
     }
 
     [Fact]
-    public void LegacyKeyPaths_CoverOldFlatVerbs()
+    public void LegacyKeyPaths_CoverOldCascadeAndOldFlatVerbs()
     {
-        Assert.Equal(3, ShellMenuSpec.LegacyKeyPaths.Count);
+        // 旧级联父键必须进清理列表，否则老用户注册表会残留重复菜单
+        Assert.Contains(@"Directory\shell\VaultLock", ShellMenuSpec.LegacyKeyPaths);
+        Assert.Contains(@"SystemFileAssociations\.flvault\shell\VaultLock", ShellMenuSpec.LegacyKeyPaths);
         Assert.Contains(@"Directory\shell\FolderLock.Add", ShellMenuSpec.LegacyKeyPaths);
         Assert.Contains(@"Directory\shell\FolderLock.Lock", ShellMenuSpec.LegacyKeyPaths);
         Assert.Contains(@"Directory\shell\FolderLock.Unlock", ShellMenuSpec.LegacyKeyPaths);

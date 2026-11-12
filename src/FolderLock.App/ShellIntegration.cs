@@ -4,7 +4,7 @@ using Microsoft.Win32;
 namespace FolderLock.App;
 
 /// <summary>
-/// 按 <see cref="ShellMenuSpec"/> 的定义写入/清理级联右键菜单。
+/// 按 <see cref="ShellMenuSpec"/> 的定义写入/清理**平铺**右键菜单。
 /// 默认写入 HKCU（无需管理员）；HKLM 需要管理员权限。
 /// </summary>
 public static class ShellIntegration
@@ -19,15 +19,13 @@ public static class ShellIntegration
             throw new InvalidOperationException("无法确定程序路径。");
         }
 
-        var definitions = new[]
-        {
-            ShellMenuSpec.ForDirectory(exe, L.Current),
-            ShellMenuSpec.ForVaultFile(exe, L.Current),
-        };
+        var definitions = ShellMenuSpec.ForDirectory(exe, L.Current)
+            .Concat(ShellMenuSpec.ForVaultFile(exe, L.Current))
+            .ToList();
 
         try
         {
-            // 先清理同名子树与旧版平铺条目，确保重复安装不会产生重复菜单。
+            // 先清理同名子树与历史遗留键（旧级联/更旧平铺），确保不会产生重复菜单。
             foreach (var definition in definitions)
             {
                 DeleteTree(scope, definition.KeyPath);
@@ -57,7 +55,8 @@ public static class ShellIntegration
 
     public static void Uninstall(ShellMenuScope scope = ShellMenuScope.CurrentUser)
     {
-        DeleteTree(scope, ShellMenuSpec.DirectoryKeyPath);
+        DeleteTree(scope, ShellMenuSpec.DirectoryLockKeyPath);
+        DeleteTree(scope, ShellMenuSpec.DirectoryUnlockKeyPath);
         DeleteTree(scope, ShellMenuSpec.VaultFileKeyPath);
 
         foreach (var legacy in ShellMenuSpec.LegacyKeyPaths)
@@ -68,34 +67,34 @@ public static class ShellIntegration
 
     public static bool IsInstalled(ShellMenuScope scope = ShellMenuScope.CurrentUser)
     {
-        using var key = Open(scope).OpenSubKey(PathUnderClasses(ShellMenuSpec.DirectoryKeyPath));
+        using var key = Open(scope).OpenSubKey(PathUnderClasses(ShellMenuSpec.DirectoryLockKeyPath));
         return key is not null;
     }
 
+    /// <summary>
+    /// 平铺写法：verb 键（默认值=菜单文本、Icon、MultiSelectModel）+ command 子键。
+    /// 平铺静态项在 Win11「显示更多选项」菜单中显示可靠（级联 SubCommands 有大量不显示的报告）。
+    /// </summary>
     private static void WriteDefinition(ShellMenuScope scope, ShellMenuDefinition definition)
     {
-        using var parent = Open(scope).CreateSubKey(PathUnderClasses(definition.KeyPath))
-            ?? throw new InvalidOperationException("无法创建右键菜单注册表键。");
-
-        parent.SetValue(null, definition.DisplayName);
-        parent.SetValue("Icon", definition.Icon);
-
-        // 级联父菜单必须设置空的 SubCommands，且父键本身不能有 command 子键。
-        parent.SetValue("SubCommands", string.Empty);
-
-        foreach (var command in definition.Commands)
+        if (definition.Commands.Count != 1)
         {
-            using var verb = parent.CreateSubKey($@"shell\{command.KeyName}")
-                ?? throw new InvalidOperationException($"无法创建菜单项 {command.KeyName}。");
-            verb.SetValue(null, command.Label);
-
-            // 多选时一次性传入全部选中项，由应用逐个处理。
-            verb.SetValue("MultiSelectModel", ShellMenuSpec.MultiSelectModel);
-
-            using var shellCommand = verb.CreateSubKey("command")
-                ?? throw new InvalidOperationException($"无法创建菜单命令 {command.KeyName}。");
-            shellCommand.SetValue(null, $"\"{definition.Icon}\" {command.Arguments}");
+            throw new InvalidOperationException(
+                $"平铺菜单项只能包含一条命令（{definition.KeyPath} 有 {definition.Commands.Count} 条）。");
         }
+
+        var command = definition.Commands[0];
+
+        using var verb = Open(scope).CreateSubKey(PathUnderClasses(definition.KeyPath))
+            ?? throw new InvalidOperationException($"无法创建右键菜单注册表键。");
+
+        verb.SetValue(null, definition.DisplayName);
+        verb.SetValue("Icon", definition.Icon);
+        verb.SetValue("MultiSelectModel", ShellMenuSpec.MultiSelectModel);
+
+        using var shellCommand = verb.CreateSubKey("command")
+            ?? throw new InvalidOperationException($"无法创建菜单命令 {command.KeyName}。");
+        shellCommand.SetValue(null, $"\"{definition.Icon}\" {command.Arguments}");
     }
 
     private static RegistryKey Open(ShellMenuScope scope) =>

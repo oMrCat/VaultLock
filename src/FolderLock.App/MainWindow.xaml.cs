@@ -1539,9 +1539,9 @@ public partial class MainWindow : FluentWindow
         try
         {
             ShellIntegration.Install();
-            // Win11（Build 22000+）的现代右键菜单不显示 classic 注册项，
-            // 只出现在「显示更多选项」旧菜单里——不说明的话用户会以为注册失败。
-            ShowInfo("已注册右键菜单。Windows 11 请在右键菜单中选择「显示更多选项」（Shift+F10）查看 VaultLock 项。");
+            // 平铺静态项在「显示更多选项」中显示可靠；若未立即出现，
+            // Explorer 可能缓存了旧菜单——重启资源管理器即可刷新。
+            ShowInfo("已注册右键菜单（加锁/解锁两项）。请右键文件夹 →「显示更多选项」(Shift+F10) 查看；若未出现，请在任务管理器重启「Windows 资源管理器」后重试。");
         }
         catch (Exception ex)
         {
