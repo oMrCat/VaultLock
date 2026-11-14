@@ -27,14 +27,12 @@ jobs:
       - name: Publish app (full, with Windows Hello)
         run: >
           dotnet publish src/FolderLock.App/FolderLock.App.csproj
-          -c Release -p:PublishProfile=win-x64 -p:FolderLockHello=true
-          -p:Version=${GITHUB_REF_NAME#v} -o publish/full
+          -c Release -p:PublishProfile=win-x64 -p:FolderLockHello=true -o publish/full
 
       - name: Publish app (lite, no Windows Hello)
         run: >
           dotnet publish src/FolderLock.App/FolderLock.App.csproj
-          -c Release -p:PublishProfile=win-x64 -p:FolderLockHello=false
-          -p:Version=${GITHUB_REF_NAME#v} -o publish/lite
+          -c Release -p:PublishProfile=win-x64 -p:FolderLockHello=false -o publish/lite
 
       - name: Publish guard service
         run: >
@@ -83,6 +81,15 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+
+          # 校验 tag 与 Directory.Build.props 里的版本一致，防止清单版本与程序集版本脱节
+          $propsVersion = (Select-String -Path Directory.Build.props -Pattern '<Version>(.+)</Version>').Matches.Groups[1].Value
+          if ($propsVersion -ne $version) {
+            Write-Error "Directory.Build.props 版本 ($propsVersion) 与 tag ($tag) 不一致，请先更新 Directory.Build.props。"
+            exit 1
+          }
+
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
 
           # 便携标记：zip 版数据存 exe 旁 data\（AppPaths.IsPortable），而非 %APPDATA%
@@ -93,9 +100,8 @@ jobs:
 
           # 应用内「检查更新」用的单文件 exe（与 Updater.DownloadAsync 的单 exe 替换流程匹配）
           # version 必须剥 v 前缀（Version.TryParse / NuGet 均不认 v 前缀）
-          $version = $tag.TrimStart("v")
           dotnet publish src/FolderLock.App/FolderLock.App.csproj `
-            -c Release -p:FolderLockHello=true -p:Version=$version -r win-x64 --self-contained false `
+            -c Release -p:FolderLockHello=true -r win-x64 --self-contained false `
             -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
             -o publish/update-exe
           Copy-Item publish/update-exe/FolderLock.App.exe "artifacts/VaultLock-$tag-win-x64-update.exe"

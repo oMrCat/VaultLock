@@ -1,0 +1,9 @@
+<Project>
+  <!--
+    全解决方案统一版本号：发版时随 tag 一起更新（CI 会校验 tag 与此一致）。
+    App 内「检查更新」比较的版本号即来自此处注入的程序集版本。
+  -->
+  <PropertyGroup>
+    <Version>1.2.0</Version>
+  </PropertyGroup>
+</Project>
