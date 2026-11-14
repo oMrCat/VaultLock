@@ -28,13 +28,13 @@ jobs:
         run: >
           dotnet publish src/FolderLock.App/FolderLock.App.csproj
           -c Release -p:PublishProfile=win-x64 -p:FolderLockHello=true
-          -p:Version=${{ github.ref_name }} -o publish/full
+          -p:Version=${GITHUB_REF_NAME#v} -o publish/full
 
       - name: Publish app (lite, no Windows Hello)
         run: >
           dotnet publish src/FolderLock.App/FolderLock.App.csproj
           -c Release -p:PublishProfile=win-x64 -p:FolderLockHello=false
-          -p:Version=${{ github.ref_name }} -o publish/lite
+          -p:Version=${GITHUB_REF_NAME#v} -o publish/lite
 
       - name: Publish guard service
         run: >
@@ -92,14 +92,15 @@ jobs:
           Compress-Archive -Path publish/lite/* -DestinationPath "artifacts/VaultLock-$tag-lite-win-x64.zip" -Force
 
           # 应用内「检查更新」用的单文件 exe（与 Updater.DownloadAsync 的单 exe 替换流程匹配）
+          # version 必须剥 v 前缀（Version.TryParse / NuGet 均不认 v 前缀）
+          $version = $tag.TrimStart("v")
           dotnet publish src/FolderLock.App/FolderLock.App.csproj `
-            -c Release -p:FolderLockHello=true -p:Version=$tag -r win-x64 --self-contained false `
+            -c Release -p:FolderLockHello=true -p:Version=$version -r win-x64 --self-contained false `
             -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
             -o publish/update-exe
           Copy-Item publish/update-exe/FolderLock.App.exe "artifacts/VaultLock-$tag-win-x64-update.exe"
 
-          # latest.json：应用内检查更新的清单（version 必须剥 v 前缀，Version.TryParse 不认）
-          $version = $tag.TrimStart("v")
+          # latest.json：应用内检查更新的清单
           $exeUrl = "https://github.com/oMrCat/VaultLock/releases/download/$tag/VaultLock-$tag-win-x64-update.exe"
           $sha = (Get-FileHash "artifacts/VaultLock-$tag-win-x64-update.exe" -Algorithm SHA256).Hash.ToLower()
           @{ version = $version; url = $exeUrl; sha256 = $sha } |
