@@ -36,6 +36,13 @@ public sealed class AppSettings
 
     public string UpdateUrl { get; set; } = string.Empty;
 
+    /// <summary>
+    /// 更新包是否必须带有效 Authenticode 签名。默认 false：未签名发布下
+    /// 完整性由 HTTPS 清单内的 SHA-256（常量时间比较）保证；启用代码签名后
+    /// 可在 settings.json 设为 true 加固。
+    /// </summary>
+    public bool RequireSignedUpdates { get; set; }
+
     public static AppSettings Current { get; } = Load();
 
     public string ExecutableHash { get; set; } = string.Empty;

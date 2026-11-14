@@ -1716,14 +1716,8 @@ public partial class MainWindow : FluentWindow
 
     private async void CheckUpdate_Click(object sender, RoutedEventArgs e)
     {
-        var url = AppSettings.Current.UpdateUrl;
-        if (string.IsNullOrWhiteSpace(url))
-        {
-            ShowInfo(L.Current == "en"
-                ? "No update source configured. Set UpdateUrl in settings.json."
-                : "未配置更新源。请在 settings.json 中设置 UpdateUrl。");
-            return;
-        }
+        // 未配置 UpdateUrl 时回落内置默认源（GitHub Releases latest.json）
+        var url = FolderLock.Core.Update.Updater.ResolveManifestUrl(AppSettings.Current.UpdateUrl);
 
         try
         {
@@ -1749,7 +1743,10 @@ public partial class MainWindow : FluentWindow
             }
 
             var target = Path.Combine(Path.GetTempPath(), "FolderLock.App.new.exe");
-            await FolderLock.Core.Update.Updater.DownloadAsync(manifest, target);
+            await FolderLock.Core.Update.Updater.DownloadAsync(
+                manifest,
+                target,
+                requireSignature: AppSettings.Current.RequireSignedUpdates);
             ApplyUpdate(target, manifest.Sha256);
         }
         catch (Exception ex)

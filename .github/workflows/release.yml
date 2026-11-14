@@ -27,12 +27,14 @@ jobs:
       - name: Publish app (full, with Windows Hello)
         run: >
           dotnet publish src/FolderLock.App/FolderLock.App.csproj
-          -c Release -p:PublishProfile=win-x64 -p:FolderLockHello=true -o publish/full
+          -c Release -p:PublishProfile=win-x64 -p:FolderLockHello=true
+          -p:Version=${{ github.ref_name }} -o publish/full
 
       - name: Publish app (lite, no Windows Hello)
         run: >
           dotnet publish src/FolderLock.App/FolderLock.App.csproj
-          -c Release -p:PublishProfile=win-x64 -p:FolderLockHello=false -o publish/lite
+          -c Release -p:PublishProfile=win-x64 -p:FolderLockHello=false
+          -p:Version=${{ github.ref_name }} -o publish/lite
 
       - name: Publish guard service
         run: >
@@ -89,12 +91,29 @@ jobs:
           Compress-Archive -Path publish/full/* -DestinationPath "artifacts/VaultLock-$tag-win-x64.zip" -Force
           Compress-Archive -Path publish/lite/* -DestinationPath "artifacts/VaultLock-$tag-lite-win-x64.zip" -Force
 
+          # 应用内「检查更新」用的单文件 exe（与 Updater.DownloadAsync 的单 exe 替换流程匹配）
+          dotnet publish src/FolderLock.App/FolderLock.App.csproj `
+            -c Release -p:FolderLockHello=true -p:Version=$tag -r win-x64 --self-contained false `
+            -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
+            -o publish/update-exe
+          Copy-Item publish/update-exe/FolderLock.App.exe "artifacts/VaultLock-$tag-win-x64-update.exe"
+
+          # latest.json：应用内检查更新的清单（version 必须剥 v 前缀，Version.TryParse 不认）
+          $version = $tag.TrimStart("v")
+          $exeUrl = "https://github.com/oMrCat/VaultLock/releases/download/$tag/VaultLock-$tag-win-x64-update.exe"
+          $sha = (Get-FileHash "artifacts/VaultLock-$tag-win-x64-update.exe" -Algorithm SHA256).Hash.ToLower()
+          @{ version = $version; url = $exeUrl; sha256 = $sha } |
+            ConvertTo-Json | Set-Content artifacts/latest.json -Encoding utf8
+
           Get-ChildItem artifacts | Select-Object Name, Length
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          files: artifacts/*.zip
+          files: |
+            artifacts/*.zip
+            artifacts/latest.json
+            artifacts/*-update.exe
           generate_release_notes: true
           draft: false
           prerelease: false

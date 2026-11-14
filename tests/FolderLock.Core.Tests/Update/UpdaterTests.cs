@@ -5,6 +5,48 @@ namespace FolderLock.Core.Tests.Update;
 
 public class UpdaterTests
 {
+    [Fact]
+    public void ResolveManifestUrl_FallsBackToDefaultWhenUnset()
+    {
+        Assert.Equal(Updater.DefaultManifestUrl, Updater.ResolveManifestUrl(null));
+        Assert.Equal(Updater.DefaultManifestUrl, Updater.ResolveManifestUrl(""));
+        Assert.Equal(Updater.DefaultManifestUrl, Updater.ResolveManifestUrl("   "));
+    }
+
+    [Fact]
+    public void ResolveManifestUrl_KeepsConfiguredSource()
+    {
+        Assert.Equal(
+            "https://example.com/my.json",
+            Updater.ResolveManifestUrl("https://example.com/my.json"));
+    }
+
+    [Fact]
+    public void Manifest_WithBareVersion_ParsesAndIsNewer()
+    {
+        // latest.json 产出的 version 必须是裸版本号（Version.TryParse 不认 v 前缀）
+        var json = "{ \"version\": \"1.2.1\", \"url\": \"https://x/v.exe\", \"sha256\": \"" +
+                   new string('a', 64) + "\" }";
+        var manifest = System.Text.Json.JsonSerializer.Deserialize<UpdateManifest>(
+            json, new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+        Assert.NotNull(manifest);
+        Assert.Null(Updater.ValidateManifest(manifest));
+        Assert.True(Updater.IsNewer("1.2.0", manifest!.Version));
+    }
+
+    [Fact]
+    public void Manifest_WithVPrefixVersion_FailsVersionParse_SoNotNewer()
+    {
+        // 文档化行为：v 前缀不被解析 —— CI 产出 latest.json 时必须剥掉
+        var json = "{ \"version\": \"v1.2.1\", \"url\": \"https://x/v.exe\", \"sha256\": \"" +
+                   new string('a', 64) + "\" }";
+        var manifest = System.Text.Json.JsonSerializer.Deserialize<UpdateManifest>(
+            json, new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+        Assert.False(Updater.IsNewer("1.2.0", manifest!.Version));
+    }
+
     [Theory]
     [InlineData("1.0.0", "1.0.1", true)]
     [InlineData("1.0.0", "1.1.0", true)]

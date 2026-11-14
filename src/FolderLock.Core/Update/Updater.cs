@@ -23,6 +23,23 @@ public static class Updater
     /// <summary>更新包大小上限：256 MB。</summary>
     public const long MaxPackageBytes = 256L * 1024 * 1024;
 
+    /// <summary>
+    /// 默认更新清单地址（GitHub Releases 的 latest/download 直链，302 到 HTTPS CDN，
+    /// 不经过 api.github.com，不受匿名限速影响）。清单格式见 <see cref="UpdateManifest"/>。
+    /// </summary>
+    public const string DefaultManifestUrl =
+        "https://github.com/oMrCat/VaultLock/releases/latest/download/latest.json";
+
+    /// <summary>
+    /// 解析实际使用的清单地址：用户配置为空/空白时回落默认源。
+    /// 必须在调用点回落而非仅改设置默认值——老用户 settings.json 里已序列化的
+    /// 空字符串会在反序列化时覆盖属性默认值。
+    /// </summary>
+    public static string ResolveManifestUrl(string? configured)
+    {
+        return string.IsNullOrWhiteSpace(configured) ? DefaultManifestUrl : configured;
+    }
+
     private static readonly JsonSerializerOptions Options = new() { PropertyNameCaseInsensitive = true };
 
     public static bool IsNewer(string currentVersion, string candidateVersion)
