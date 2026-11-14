@@ -47,6 +47,7 @@ public static class ShellMenuSpec
     public const string DirectoryLockKeyPath = @"Directory\shell\VaultLock.Lock";
     public const string DirectoryUnlockKeyPath = @"Directory\shell\VaultLock.Unlock";
     public const string VaultFileKeyPath = @"SystemFileAssociations\.flvault\shell\VaultLock.Open";
+    public const string VaultFileUnlockKeyPath = @"SystemFileAssociations\.flvault\shell\VaultLock.Unlock";
 
     /// <summary>历史遗留键（旧级联/更旧平铺），安装/卸载时必须一并清理。</summary>
     public static readonly IReadOnlyList<string> LegacyKeyPaths = new[]
@@ -83,12 +84,17 @@ public static class ShellMenuSpec
         };
     }
 
-    /// <summary>.flvault 文件右键：在主界面打开（平铺）。</summary>
+    /// <summary>.flvault 文件右键：解锁（加密加锁后原文件夹消失，解锁入口跟容器走）、在主界面打开。</summary>
     public static IReadOnlyList<ShellMenuDefinition> ForVaultFile(string executablePath, string language = "zh")
     {
         var labels = Labels.For(language);
         return new[]
         {
+            new ShellMenuDefinition(
+                VaultFileUnlockKeyPath,
+                $"VaultLock：{labels.Unlock}",
+                executablePath,
+                new[] { new ShellMenuCommand("unlock", labels.Unlock, "--unlock \"%1\"") }),
             new ShellMenuDefinition(
                 VaultFileKeyPath,
                 $"VaultLock：{labels.Open}",

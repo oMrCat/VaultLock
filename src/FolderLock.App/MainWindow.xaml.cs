@@ -401,8 +401,11 @@ public partial class MainWindow : FluentWindow
         PageSubtitle.Text = L.Format("Page.Count", visible);
 
         var empty = visible == 0;
+        // 空态只隐藏提示层；DataGrid 保持 Visible —— 它是全窗口唯一的
+        // 文件夹拖放命中面（背景 Transparent），Collapsed 掉会让空列表时
+        // 拖入永远禁止（全窗口其余区域由窗口级 AllowDrop 兜底）。
         EmptyState.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
-        FolderList.Visibility = empty ? Visibility.Collapsed : Visibility.Visible;
+        FolderList.Visibility = Visibility.Visible;
     }
 
     private bool FilterItem(object obj)
@@ -1292,16 +1295,36 @@ public partial class MainWindow : FluentWindow
 
     private void ExternalUnlock(string path)
     {
-        var normalized = NormalizeExisting(path);
-        if (normalized is null)
+        // 双分支：文件夹路径 = ACL 模式（按 Path 反查）；.flvault 容器路径 =
+        // AES 加密模式（加锁后原文件夹已消失，按 VaultPath 反查，仿 ExternalOpen）。
+        var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        FolderRecord? record;
+        if (Directory.Exists(full))
         {
-            return;
+            record = AppServices.Folders.GetByPath(full);
+            if (record is null)
+            {
+                ShowInfo("该文件夹不在列表中。");
+                return;
+            }
         }
-
-        var record = AppServices.Folders.GetByPath(normalized);
-        if (record is null)
+        else if (File.Exists(full))
         {
-            ShowInfo("该文件夹不在列表中。");
+            record = AppServices.Folders.GetAll().FirstOrDefault(item =>
+                item.VaultPath is not null &&
+                string.Equals(
+                    Path.GetFullPath(item.VaultPath),
+                    full,
+                    StringComparison.OrdinalIgnoreCase));
+            if (record is null)
+            {
+                ShowInfo("该容器文件不在保护列表中。");
+                return;
+            }
+        }
+        else
+        {
+            ShowInfo($"路径不存在：{full}");
             return;
         }
 

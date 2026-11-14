@@ -58,6 +58,7 @@ public static class ShellIntegration
         DeleteTree(scope, ShellMenuSpec.DirectoryLockKeyPath);
         DeleteTree(scope, ShellMenuSpec.DirectoryUnlockKeyPath);
         DeleteTree(scope, ShellMenuSpec.VaultFileKeyPath);
+        DeleteTree(scope, ShellMenuSpec.VaultFileUnlockKeyPath);
 
         foreach (var legacy in ShellMenuSpec.LegacyKeyPaths)
         {

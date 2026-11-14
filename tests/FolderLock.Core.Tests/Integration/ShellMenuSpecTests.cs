@@ -34,14 +34,16 @@ public sealed class ShellMenuSpecTests
     }
 
     [Fact]
-    public void ForVaultFile_BuildsSingleFlatOpenEntry()
+    public void ForVaultFile_BuildsUnlockAndOpenEntries()
     {
         var definitions = ShellMenuSpec.ForVaultFile(Exe, "zh");
 
-        var definition = Assert.Single(definitions);
-        Assert.Equal(@"SystemFileAssociations\.flvault\shell\VaultLock.Open", definition.KeyPath);
-        Assert.Single(definition.Commands);
-        Assert.Equal("--open \"%1\"", definition.Commands[0].Arguments);
+        Assert.Equal(2, definitions.Count);
+        Assert.Equal(@"SystemFileAssociations\.flvault\shell\VaultLock.Unlock", definitions[0].KeyPath);
+        Assert.Equal(@"SystemFileAssociations\.flvault\shell\VaultLock.Open", definitions[1].KeyPath);
+        Assert.All(definitions, definition => Assert.Single(definition.Commands));
+        Assert.Equal("--unlock \"%1\"", definitions[0].Commands[0].Arguments);
+        Assert.Equal("--open \"%1\"", definitions[1].Commands[0].Arguments);
     }
 
     [Fact]
@@ -52,7 +54,8 @@ public sealed class ShellMenuSpecTests
 
         Assert.Equal("VaultLock：Lock", directory[0].DisplayName);
         Assert.Equal("Lock", directory[0].Commands[0].Label);
-        Assert.Equal("VaultLock：Open in VaultLock", vault[0].DisplayName);
+        Assert.Equal("VaultLock：Unlock", vault[0].DisplayName);
+        Assert.Equal("VaultLock：Open in VaultLock", vault[1].DisplayName);
     }
 
     [Fact]
@@ -77,5 +80,14 @@ public sealed class ShellMenuSpecTests
         Assert.Contains(@"Directory\shell\FolderLock.Add", ShellMenuSpec.LegacyKeyPaths);
         Assert.Contains(@"Directory\shell\FolderLock.Lock", ShellMenuSpec.LegacyKeyPaths);
         Assert.Contains(@"Directory\shell\FolderLock.Unlock", ShellMenuSpec.LegacyKeyPaths);
+    }
+
+    [Fact]
+    public void Uninstall_CoversAllFlatKeys()
+    {
+        Assert.Equal(@"Directory\shell\VaultLock.Lock", ShellMenuSpec.DirectoryLockKeyPath);
+        Assert.Equal(@"Directory\shell\VaultLock.Unlock", ShellMenuSpec.DirectoryUnlockKeyPath);
+        Assert.Equal(@"SystemFileAssociations\.flvault\shell\VaultLock.Open", ShellMenuSpec.VaultFileKeyPath);
+        Assert.Equal(@"SystemFileAssociations\.flvault\shell\VaultLock.Unlock", ShellMenuSpec.VaultFileUnlockKeyPath);
     }
 }

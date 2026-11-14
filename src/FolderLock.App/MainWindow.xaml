@@ -11,7 +11,10 @@
                  WindowStartupLocation="CenterScreen"
                  ExtendsContentIntoTitleBar="True"
                  WindowBackdropType="Mica"
-                 WindowCornerPreference="Round">
+                 WindowCornerPreference="Round"
+                 AllowDrop="True"
+                 DragOver="FolderList_DragOver"
+                 Drop="FolderList_Drop">
     <ui:FluentWindow.Resources>
         <Style x:Key="NavButtonStyle" TargetType="RadioButton">
             <Setter Property="Margin" Value="0,2" />
@@ -278,7 +281,7 @@
                     </DataGrid>
 
                     <StackPanel x:Name="EmptyState" VerticalAlignment="Center" HorizontalAlignment="Center"
-                                Visibility="Collapsed">
+                                Visibility="Collapsed" IsHitTestVisible="False">
                         <ui:SymbolIcon Symbol="Folder24" FontSize="48"
                                        Foreground="{DynamicResource TextFillColorSecondaryBrush}"
                                        HorizontalAlignment="Center" />
